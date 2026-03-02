@@ -179,13 +179,38 @@ export function TrackTab() {
     const { data } = await query;
     if (!data) return;
 
+    // Helper: geocode a location string when GPS coords are missing
+    async function geocode(loc: string, district: string): Promise<{lat: number, lng: number} | null> {
+      if (!loc) return null;
+      try {
+        const q = encodeURIComponent(`${loc}, ${district || ''}, Rwanda`);
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1&countrycodes=rw`, { headers: { 'Accept-Language': 'en' } });
+        const d = await res.json();
+        if (!d.length) return null;
+        return { lat: parseFloat(d[0].lat), lng: parseFloat(d[0].lon) };
+      } catch { return null; }
+    }
+
     const enriched = await Promise.all(data.map(async (o: any) => {
       const { data: sp } = await supabase.from('profiles').select('latitude,longitude').eq('id', o.sender_id).maybeSingle();
       const { data: rp } = o.receiver_id ? await supabase.from('profiles').select('latitude,longitude').eq('id', o.receiver_id).maybeSingle() : { data: null };
+
+      // Fall back to geocoding if GPS not saved yet
+      let sLat = sp?.latitude, sLng = sp?.longitude;
+      let rLat = rp?.latitude, rLng = rp?.longitude;
+      if (!sLat && o.sender_location) {
+        const g = await geocode(o.sender_location, o.sender_district);
+        if (g) { sLat = g.lat; sLng = g.lng; }
+      }
+      if (!rLat && o.receiver_location) {
+        const g = await geocode(o.receiver_location, o.receiver_district);
+        if (g) { rLat = g.lat; rLng = g.lng; }
+      }
+
       return {
         ...o,
-        sender_lat: sp?.latitude, sender_lng: sp?.longitude,
-        receiver_lat: rp?.latitude, receiver_lng: rp?.longitude,
+        sender_lat: sLat, sender_lng: sLng,
+        receiver_lat: rLat, receiver_lng: rLng,
         driver_lat: o.drivers?.latitude, driver_lng: o.drivers?.longitude,
         driver_name: o.drivers?.profiles?.full_name,
         driver_phone: o.drivers?.profiles?.phone_number,

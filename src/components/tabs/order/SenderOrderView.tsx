@@ -442,9 +442,31 @@ export function SenderOrderView({ onPriceRequest }: {
       });
       if (momoErr || !momoData?.success) throw new Error(momoData?.error || 'MoMo request failed');
 
+      // ── Simulated payment (no MoMo creds) — already approved by Edge Function ──
+      if (momoData?.mode === 'simulated') {
+        setPaymentStep('paid');
+        setLoading(false);
+        setSuccess(true);
+        if (receiverId) {
+          await supabase.from('notifications').insert({
+            user_id: receiverId, title: '📦 Package coming your way!',
+            body: `${(profile as any).full_name} is sending you a package.`,
+            type: 'new_order', order_id: newOrder.id, read: false,
+          });
+        }
+        setReceiverHasApp(null); setSelectedReceiver(null); setSearchName('');
+        setManualName(''); setManualPhone({ code: '+250', number: '' });
+        setManualDistrict(''); setManualLocation(''); setManualLocCoords(null);
+        setPackageWeight(''); setEmergencyNote('');
+        setPayerName(''); setPayerPhone({ code: '+250', number: '' }); setPayerPhoneErr(null);
+        setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null);
+        setTimeout(() => { setSuccess(false); setPaymentStep(null); }, 5000);
+        return;
+      }
+
       setPaymentStep('pending');
 
-      // ── Poll every 5 seconds until confirmed ──
+      // ── Poll every 5 seconds until confirmed (real MoMo) ──
       let attempts = 0;
       const poll = setInterval(async () => {
         attempts++;
@@ -461,11 +483,11 @@ export function SenderOrderView({ onPriceRequest }: {
         });
         if (checkData?.status === 'SUCCESSFUL') {
           clearInterval(poll);
-          // Also update from frontend as a safety net (Edge Function does this too)
+          // Also update from frontend as a safety net
           await supabase.from('orders').update({
             sender_paid:    true,
             payment_status: 'paid',
-            status:         'pending', // now visible to drivers
+            status:         'pending',
             updated_at:     new Date().toISOString(),
           }).eq('id', newOrder.id);
           setPaymentStep('paid');
