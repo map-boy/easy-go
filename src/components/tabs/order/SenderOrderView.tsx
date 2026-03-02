@@ -461,6 +461,13 @@ export function SenderOrderView({ onPriceRequest }: {
         });
         if (checkData?.status === 'SUCCESSFUL') {
           clearInterval(poll);
+          // Also update from frontend as a safety net (Edge Function does this too)
+          await supabase.from('orders').update({
+            sender_paid:    true,
+            payment_status: 'paid',
+            status:         'pending', // now visible to drivers
+            updated_at:     new Date().toISOString(),
+          }).eq('id', newOrder.id);
           setPaymentStep('paid');
           setLoading(false);
           setSuccess(true);

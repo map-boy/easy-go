@@ -72,7 +72,7 @@ export function DriverTab() {
 
     const channel = supabase.channel('driver-orders')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, () => loadPendingOrders())
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' }, () => loadDriverData())
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' }, () => { loadPendingOrders(); loadDriverData(); })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
@@ -113,7 +113,7 @@ export function DriverTab() {
     const { data } = await supabase
       .from('orders')
       .select('*, profiles:sender_id(full_name, phone_number, latitude, longitude), receiver:receiver_id(full_name, phone_number, latitude, longitude)')
-      .eq('status', 'pending')
+      .in('status', ['pending', 'awaiting_payment'])
       .order('created_at', { ascending: false });
     setPendingOrders(data || []);
   }
@@ -429,11 +429,21 @@ export function DriverTab() {
                 <p style={{ color: 'var(--text3)', fontSize: '12px', marginTop: '4px' }}>New orders will appear here automatically</p>
               </div>
             ) : pendingOrders.map(order => (
-              <div key={order.id} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: '14px', padding: '14px', marginBottom: '10px' }}>
+              <div key={order.id} style={{ background: 'var(--bg2)', border: `1px solid ${order.status === 'awaiting_payment' ? 'rgba(249,115,22,0.3)' : 'var(--border)'}`, borderRadius: '14px', padding: '14px', marginBottom: '10px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
                   <div>
                     <p style={{ fontSize: '11px', color: 'var(--text3)', fontFamily: 'monospace', marginBottom: '2px' }}>#{order.id.slice(0, 8)}</p>
                     <p style={{ fontSize: '12px', color: 'var(--text3)' }}>{new Date(order.created_at).toLocaleString()}</p>
+                    {order.status === 'awaiting_payment' && (
+                      <span style={{ fontSize: '10px', fontWeight: 700, color: '#f97316', background: 'rgba(249,115,22,0.1)', border: '1px solid rgba(249,115,22,0.3)', borderRadius: '6px', padding: '2px 7px', display: 'inline-block', marginTop: '4px' }}>
+                        ⏳ Awaiting payment
+                      </span>
+                    )}
+                    {order.status === 'pending' && (
+                      <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--green)', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '6px', padding: '2px 7px', display: 'inline-block', marginTop: '4px' }}>
+                        ✅ Paid — Ready to accept
+                      </span>
+                    )}
                   </div>
                   <p style={{ fontWeight: 800, fontSize: '16px', color: 'var(--yellow)' }}>{(order.predicted_price || 0).toLocaleString()} RWF</p>
                 </div>
