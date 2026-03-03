@@ -122,3 +122,4 @@ supabase functions deploy check-payment --no-verify-jwt
 - Email: wandaatech@gmail.com
 - Phone: +250 780 867 473
 - Available 24/7
+...............................
