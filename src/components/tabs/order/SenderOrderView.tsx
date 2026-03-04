@@ -162,91 +162,124 @@ function DistrictInput({ value, onChange, error }: { value: string; onChange: (v
   );
 }
 
-// ── Location input with geocode validation ─────────────────────────────────
+// ── Location input — suggestions like district (text stays as typed, pick to pin) ──
 function LocationInput({ value, onChange, district, onValidated, error, setError }: {
   value: string; onChange: (v: string) => void; district: string;
   onValidated: (lat: number, lng: number, display: string) => void;
   error?: string | null; setError: (e: string | null) => void;
 }) {
-  const [checking, setChecking] = useState(false);
-  const [verified, setVerified] = useState(false);
+  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [show, setShow]               = useState(false);
+  const [pinned, setPinned]           = useState(false);
+  const [loading, setLoading]         = useState(false);
+  const ref   = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // close on outside click
   useEffect(() => {
-    setVerified(false);
-    if (!value.trim() || value.length < 4) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setShow(false);
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+
+  // fetch suggestions when user types — text is NOT changed
+  useEffect(() => {
+    setPinned(false);
+    setError(null);
+    if (!value.trim() || value.length < 3) { setSuggestions([]); setShow(false); return; }
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
-      setChecking(true);
-      const r = await validateLocation(value, district);
-      setChecking(false);
-      if (r.valid && r.lat && r.lng && r.display) {
-        setVerified(true); setError(null); onValidated(r.lat, r.lng, r.display);
-      } else {
-        setVerified(false); setError('Location not found on map — try a more specific name');
-      }
-    }, 900);
+      setLoading(true);
+      try {
+        const q = encodeURIComponent(`${value}, ${district || 'Kigali'}, Rwanda`);
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=6&countrycodes=rw&addressdetails=1`,
+          { headers: { 'Accept-Language': 'en', 'User-Agent': 'EasyGO-App/1.0' } }
+        );
+        const data = await res.json();
+        setSuggestions(data);
+        setShow(data.length > 0);
+      } catch { setSuggestions([]); }
+      setLoading(false);
+    }, 500);
   }, [value, district]);
+
+  function formatSuggestion(place: any): string {
+    const a = place.address || {};
+    return [
+      a.road || a.pedestrian || a.footway,
+      a.neighbourhood || a.suburb,
+      a.city_district || a.quarter,
+      a.city || a.town || 'Kigali',
+    ].filter(Boolean).join(', ');
+  }
+
   return (
-    <div>
+    <div ref={ref}>
       <label className="eg-label">Location / Street</label>
       <div style={{ position: 'relative' }}>
         <MapPin size={13} color="var(--text3)" style={{ position: 'absolute', left: '11px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
-        <input className="eg-input" placeholder="e.g. KG 11 Ave, Kimihurura" value={value}
-          onChange={e => { onChange(e.target.value); setVerified(false); setError(null); }}
-          style={{ paddingLeft: '32px', paddingRight: '32px', border: `1px solid ${error ? 'var(--red)' : verified ? 'rgba(34,197,94,0.5)' : 'var(--border2)'}` }} />
+        <input
+          className="eg-input"
+          placeholder="e.g. KG 11 Ave, Kimihurura"
+          value={value}
+          onChange={e => { onChange(e.target.value); setPinned(false); setError(null); }}
+          onFocus={() => { if (suggestions.length > 0) setShow(true); }}
+          autoComplete="off"
+          style={{
+            paddingLeft: '32px',
+            paddingRight: '32px',
+            border: `1px solid ${error ? 'var(--red)' : pinned ? 'rgba(34,197,94,0.5)' : 'var(--border2)'}`,
+          }}
+        />
         <div style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)' }}>
-          {checking && <div className="spinner" style={{ width: '14px', height: '14px' }} />}
-          {verified && !checking && <CheckCircle size={14} color="var(--green)" />}
+          {loading && <div className="spinner" style={{ width: '13px', height: '13px' }} />}
+          {pinned && !loading && <CheckCircle size={13} color="var(--green)" />}
         </div>
+
+        {/* Suggestions dropdown — same pattern as DistrictInput */}
+        {show && suggestions.length > 0 && (
+          <div style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 9999,
+            background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '10px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.15)', maxHeight: '200px', overflowY: 'auto',
+          }}>
+            {suggestions.map((place, i) => {
+              const label = formatSuggestion(place);
+              return (
+                <div
+                  key={i}
+                  onMouseDown={() => {
+                    // pin coords but keep user's original typed text
+                    onValidated(parseFloat(place.lat), parseFloat(place.lon), label);
+                    setPinned(true);
+                    setError(null);
+                    setShow(false);
+                  }}
+                  style={{
+                    padding: '9px 14px', cursor: 'pointer', borderBottom: '1px solid var(--border)',
+                    background: 'transparent',
+                  }}
+                  onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--bg3)'}
+                  onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+                >
+                  <p style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text)' }}>📍 {label}</p>
+                  <p style={{ fontSize: '10px', color: 'var(--text3)', marginTop: '2px' }}>{place.display_name}</p>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
-      {error    && <p style={{ fontSize: '11px', color: 'var(--red)',   marginTop: '5px' }}>⚠️ {error}</p>}
-      {verified && <p style={{ fontSize: '11px', color: 'var(--green)', marginTop: '5px' }}>✓ Location verified on map</p>}
+      {error  && <p style={{ fontSize: '11px', color: 'var(--red)',   marginTop: '5px' }}>⚠️ {error}</p>}
+      {pinned && <p style={{ fontSize: '11px', color: 'var(--green)', marginTop: '5px' }}>✓ Location pinned on map</p>}
     </div>
   );
 }
 
-// ── MOMO CHECKLIST ─────────────────────────────────────────────────────────
-async function runMomoChecklist(): Promise<{ key: string; label: string; ok: boolean; detail: string }[]> {
-  const results = [];
 
-  // 1. Check Edge Function: request-payment exists
-  try {
-    const { error } = await supabase.functions.invoke('request-payment', {
-      body: { __ping: true, orderId: 'test', amount: 0, phoneNumber: '250700000000' },
-    });
-    results.push({ key: 'fn_request', label: 'Edge Function: request-payment', ok: !error || !error.message?.includes('not found'), detail: error ? error.message : 'Deployed ✓' });
-  } catch (e: any) {
-    results.push({ key: 'fn_request', label: 'Edge Function: request-payment', ok: false, detail: e.message });
-  }
-
-  // 2. Check Edge Function: check-payment exists
-  try {
-    const { error } = await supabase.functions.invoke('check-payment', {
-      body: { __ping: true, paymentId: 'test', orderId: 'test' },
-    });
-    results.push({ key: 'fn_check', label: 'Edge Function: check-payment', ok: !error || !error.message?.includes('not found'), detail: error ? error.message : 'Deployed ✓' });
-  } catch (e: any) {
-    results.push({ key: 'fn_check', label: 'Edge Function: check-payment', ok: false, detail: e.message });
-  }
-
-  // 3. Check orders table has momo_payment_id column
-  try {
-    const { data, error } = await supabase.from('orders').select('momo_payment_id, payment_status, sender_paid').limit(1);
-    results.push({ key: 'db_cols', label: 'DB columns: momo_payment_id, payment_status, sender_paid', ok: !error, detail: error ? error.message : 'All columns exist ✓' });
-  } catch (e: any) {
-    results.push({ key: 'db_cols', label: 'DB columns', ok: false, detail: e.message });
-  }
-
-  // 4. Check Supabase connection
-  try {
-    const { error } = await supabase.from('profiles').select('id').limit(1);
-    results.push({ key: 'supabase', label: 'Supabase connection', ok: !error, detail: error ? error.message : 'Connected ✓' });
-  } catch (e: any) {
-    results.push({ key: 'supabase', label: 'Supabase connection', ok: false, detail: e.message });
-  }
-
-  return results;
-}
 
 // ── MAIN COMPONENT ─────────────────────────────────────────────────────────
 export function SenderOrderView({ onPriceRequest }: {
@@ -278,8 +311,10 @@ export function SenderOrderView({ onPriceRequest }: {
   const [payerName,     setPayerName]     = useState('');
   const [payerPhone,    setPayerPhone]    = useState({ code: '+250', number: '' });
   const [payerPhoneErr, setPayerPhoneErr] = useState<string | null>(null);
-  const [weatherCond,   setWeatherCond]   = useState<'normal'|'rain'>('normal');
-  const [roadCond,      setRoadCond]      = useState<'good'|'moderate'|'poor'>('good');
+  // ── auto conditions (no manual input) ──
+  const [weatherCond,     setWeatherCond]     = useState<'normal'|'rain'>('normal');
+  const [roadCond,        setRoadCond]        = useState<'good'|'moderate'|'poor'>('good');
+  const [conditionsReady, setConditionsReady] = useState(false);
   const [emergencyNote, setEmergencyNote] = useState('');
 
   // ── price ──
@@ -295,10 +330,9 @@ export function SenderOrderView({ onPriceRequest }: {
   const [loading,     setLoading]     = useState(false);
   const [success,     setSuccess]     = useState(false);
 
-  // ── momo checklist ──
-  const [showChecklist,   setShowChecklist]   = useState(false);
-  const [checklistItems,  setChecklistItems]  = useState<any[]>([]);
-  const [checklistLoading,setChecklistLoading]= useState(false);
+  // ── new package options ──
+  const [isFragile,      setIsFragile]      = useState(false);
+  const [deliverySpeed,  setDeliverySpeed]  = useState<'normal'|'rapid'>('normal');
 
   // ── misc ──
   const [senderPos, setSenderPos] = useState<[number,number]>([-1.9441, 30.0619]);
@@ -321,6 +355,40 @@ export function SenderOrderView({ onPriceRequest }: {
       () => setSenderPos([-1.9441, 30.0619])
     );
   }, []);
+
+  // ── Auto-detect weather + road conditions ──────────────────────────────
+  useEffect(() => {
+    async function detectConditions() {
+      try {
+        // Open-Meteo: free, no API key, Rwanda coords
+        const [lat, lng] = senderPos;
+        const res = await fetch(
+          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}` +
+          `&current=precipitation,weathercode,windspeed_10m&timezone=Africa%2FKigali`
+        );
+        const data = await res.json();
+        const precip    = data.current?.precipitation ?? 0;   // mm
+        const wcode     = data.current?.weathercode   ?? 0;   // WMO code
+        const windspeed = data.current?.windspeed_10m ?? 0;   // km/h
+
+        // WMO codes: 51-67 = drizzle/rain, 71-77 = snow, 80-82 = showers, 95-99 = thunderstorm
+        const isRaining = precip > 0.2 || (wcode >= 51 && wcode <= 99) || windspeed > 40;
+        setWeatherCond(isRaining ? 'rain' : 'normal');
+
+        // Road condition: night hours = moderate (less visibility, potholes harder to see)
+        const hour = new Date().getHours();
+        const isNightDriving = hour >= 20 || hour < 5;
+        setRoadCond(isNightDriving ? 'moderate' : 'good');
+      } catch {
+        // fallback: just use time-of-day for road, normal weather
+        const hour = new Date().getHours();
+        setRoadCond(hour >= 20 || hour < 5 ? 'moderate' : 'good');
+        setWeatherCond('normal');
+      }
+      setConditionsReady(true);
+    }
+    detectConditions();
+  }, [senderPos[0], senderPos[1]]);
 
   // live name search
   useEffect(() => {
@@ -352,7 +420,7 @@ export function SenderOrderView({ onPriceRequest }: {
   useEffect(() => {
     if (allFilled) calculatePrice();
     else { setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null); }
-  }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat, packageSize, weatherCond, roadCond]);
+  }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat, packageSize, weatherCond, roadCond, isFragile, deliverySpeed]);
 
   async function calculatePrice() {
     setPriceLoading(true); setPriceReady(false);
@@ -393,6 +461,7 @@ export function SenderOrderView({ onPriceRequest }: {
       if (packageSize === 'large') final = Math.round(final * 1.3);
       if (packageSize === 'small') final = Math.round(final * 0.8);
       if (roadCond === 'moderate') final = Math.round(final * 1.1);
+      if (deliverySpeed === 'rapid') final = Math.round(final * 1.2);
       setPredictedPrice(Math.max(final, 1500)); setPriceReady(true);
     } catch (err) {
       console.error(err); setPredictedPrice(3500); setPriceReady(true);
@@ -421,7 +490,8 @@ export function SenderOrderView({ onPriceRequest }: {
         receiver_location: receiverLocation, receiver_district: receiverDistrict,
         package_size: packageSize, package_weight: packageWeight,
         predicted_price: predictedPrice, payment_method: paymentMethod,
-        emergency_note: emergencyNote, is_night_delivery: isNight,
+        delivery_note: emergencyNote, is_night_delivery: isNight,
+        is_fragile: isFragile, delivery_speed: deliverySpeed,
         weather_condition: weatherCond, road_condition: roadCond,
         status: 'awaiting_payment', // hidden from drivers
         sender_paid:   false,
@@ -524,50 +594,8 @@ export function SenderOrderView({ onPriceRequest }: {
     }
   }
 
-  // ── Run checklist ──────────────────────────────────────────────────────
-  async function handleChecklist() {
-    setShowChecklist(true); setChecklistLoading(true);
-    const items = await runMomoChecklist();
-    setChecklistItems(items); setChecklistLoading(false);
-  }
-
   return (
     <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-
-      {/* ── MOMO CHECKLIST BLOCK ── */}
-      <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '12px', padding: '14px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: showChecklist ? '12px' : 0 }}>
-          <div>
-            <p style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text)' }}>🔍 MoMo Integration Check</p>
-            <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>Verify all payment systems are ready</p>
-          </div>
-          <button type="button" onClick={handleChecklist} disabled={checklistLoading}
-            style={{ padding: '7px 14px', background: 'var(--yellow)', border: 'none', borderRadius: '8px', cursor: 'pointer', fontFamily: 'Space Grotesk,sans-serif', fontWeight: 700, fontSize: '12px', color: '#0a0a0a', opacity: checklistLoading ? 0.7 : 1, display: 'flex', alignItems: 'center', gap: '6px' }}>
-            {checklistLoading ? <><div className="spinner" style={{ width: '12px', height: '12px' }} /> Checking…</> : 'Run Check'}
-          </button>
-        </div>
-
-        {showChecklist && !checklistLoading && checklistItems.length > 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            {checklistItems.map(item => (
-              <div key={item.key} style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '9px 12px', background: item.ok ? 'rgba(34,197,94,0.07)' : 'rgba(239,68,68,0.07)', border: `1px solid ${item.ok ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`, borderRadius: '8px' }}>
-                <span style={{ fontSize: '14px', flexShrink: 0 }}>{item.ok ? '✅' : '❌'}</span>
-                <div style={{ flex: 1 }}>
-                  <p style={{ fontSize: '12px', fontWeight: 700, color: item.ok ? 'var(--green)' : 'var(--red)' }}>{item.label}</p>
-                  <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>{item.detail}</p>
-                </div>
-              </div>
-            ))}
-            <div style={{ marginTop: '6px', padding: '9px 12px', background: checklistItems.every(i => i.ok) ? 'rgba(34,197,94,0.08)' : 'rgba(245,158,11,0.08)', border: `1px solid ${checklistItems.every(i => i.ok) ? 'rgba(34,197,94,0.25)' : 'rgba(245,158,11,0.25)'}`, borderRadius: '8px', textAlign: 'center' }}>
-              <p style={{ fontSize: '13px', fontWeight: 700, color: checklistItems.every(i => i.ok) ? 'var(--green)' : 'var(--yellow)' }}>
-                {checklistItems.every(i => i.ok)
-                  ? '🎉 All systems ready — MoMo payments will work!'
-                  : `⚠️ ${checklistItems.filter(i => !i.ok).length} issue(s) found — fix them before testing payments`}
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
 
       {/* Success banner */}
       {success && (
@@ -686,6 +714,74 @@ export function SenderOrderView({ onPriceRequest }: {
           <label className="eg-label">Weight</label>
           <input className="eg-input" required placeholder="e.g. 2.5 kg" value={packageWeight} onChange={e => setPackageWeight(e.target.value)} />
         </div>
+
+        {/* ── FRAGILE TOGGLE ── */}
+        <div style={{ marginTop: '4px' }}>
+          <label className="eg-label">Product Handling</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+            {[
+              { val: false, emoji: '📦', label: 'Non-Fragile', sub: 'Normal handling', color: 'var(--green)' },
+              { val: true,  emoji: '🫧', label: 'Fragile',     sub: 'Handle with care', color: '#f97316' },
+            ].map(opt => (
+              <div
+                key={String(opt.val)}
+                onClick={() => setIsFragile(opt.val)}
+                style={{
+                  padding: '12px 8px',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                  background: isFragile === opt.val ? `${opt.color}12` : 'var(--bg3)',
+                  border: `2px solid ${isFragile === opt.val ? opt.color : 'var(--border)'}`,
+                  transition: 'all .15s',
+                }}
+              >
+                <p style={{ fontSize: '20px', marginBottom: '4px' }}>{opt.emoji}</p>
+                <p style={{ fontSize: '12px', fontWeight: 700, color: isFragile === opt.val ? opt.color : 'var(--text)' }}>{opt.label}</p>
+                <p style={{ fontSize: '10px', color: 'var(--text3)', marginTop: '2px' }}>{opt.sub}</p>
+              </div>
+            ))}
+          </div>
+          {isFragile && (
+            <div style={{ marginTop: '8px', padding: '9px 12px', background: 'rgba(249,115,22,0.06)', border: '1px solid rgba(249,115,22,0.2)', borderRadius: '8px' }}>
+              <p style={{ fontSize: '11px', color: '#f97316', fontWeight: 600 }}>⚠️ Driver will be notified to handle this package with extra care</p>
+            </div>
+          )}
+        </div>
+
+        {/* ── DELIVERY SPEED ── */}
+        <div style={{ marginTop: '4px' }}>
+          <label className="eg-label">Delivery Speed</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+            {[
+              { val: 'normal' as const, emoji: '🚲', label: 'Normal',  sub: 'Standard delivery',  extra: 'No surcharge' },
+              { val: 'rapid'  as const, emoji: '⚡', label: 'Rapid',   sub: 'Priority — faster',  extra: '+20% price' },
+            ].map(opt => (
+              <div
+                key={opt.val}
+                onClick={() => setDeliverySpeed(opt.val)}
+                style={{
+                  padding: '12px 8px',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                  background: deliverySpeed === opt.val
+                    ? opt.val === 'rapid' ? 'rgba(245,197,24,0.09)' : 'rgba(34,197,94,0.08)'
+                    : 'var(--bg3)',
+                  border: `2px solid ${deliverySpeed === opt.val
+                    ? opt.val === 'rapid' ? 'rgba(245,197,24,0.55)' : 'rgba(34,197,94,0.4)'
+                    : 'var(--border)'}`,
+                  transition: 'all .15s',
+                }}
+              >
+                <p style={{ fontSize: '20px', marginBottom: '4px' }}>{opt.emoji}</p>
+                <p style={{ fontSize: '12px', fontWeight: 700, color: deliverySpeed === opt.val ? (opt.val === 'rapid' ? 'var(--yellow)' : 'var(--green)') : 'var(--text)' }}>{opt.label}</p>
+                <p style={{ fontSize: '10px', color: 'var(--text3)', marginTop: '1px' }}>{opt.sub}</p>
+                <p style={{ fontSize: '10px', fontWeight: 700, marginTop: '3px', color: opt.val === 'rapid' ? 'var(--yellow)' : 'var(--green)' }}>{opt.extra}</p>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* ── PAYMENT ── */}
@@ -768,41 +864,107 @@ export function SenderOrderView({ onPriceRequest }: {
         </div>
       </div>
 
-      {/* ── CONDITIONS ── */}
+      {/* ── CONDITIONS — auto detected, read-only ── */}
       <div className="card">
         <Sec icon={CloudRain} title="Delivery Conditions" color="var(--blue)" />
-        <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '12px' }}>Added on top of base km price</p>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-          <div>
-            <label className="eg-label">Weather</label>
-            <select className="eg-input" value={weatherCond} onChange={e => setWeatherCond(e.target.value as any)} style={{ cursor: 'pointer' }}>
-              <option value="normal">☀️ Normal</option>
-              <option value="rain">🌧️ Rain (+surge)</option>
-            </select>
+        {!conditionsReady ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 0' }}>
+            <div className="spinner" style={{ width: '14px', height: '14px' }} />
+            <p style={{ fontSize: '12px', color: 'var(--text3)' }}>Detecting local conditions…</p>
           </div>
-          <div>
-            <label className="eg-label">Road</label>
-            <select className="eg-input" value={roadCond} onChange={e => setRoadCond(e.target.value as any)} style={{ cursor: 'pointer' }}>
-              <option value="good">✅ Good</option>
-              <option value="moderate">⚠️ Moderate (+10%)</option>
-              <option value="poor">❌ Poor (+surge)</option>
-            </select>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {/* Weather row */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 14px', borderRadius: '10px',
+              background: weatherCond === 'rain' ? 'rgba(96,165,250,0.08)' : 'rgba(34,197,94,0.07)',
+              border: `1px solid ${weatherCond === 'rain' ? 'rgba(96,165,250,0.25)' : 'rgba(34,197,94,0.2)'}`,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '20px' }}>{weatherCond === 'rain' ? '🌧️' : '☀️'}</span>
+                <div>
+                  <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text)' }}>
+                    {weatherCond === 'rain' ? 'Rain detected' : 'Clear weather'}
+                  </p>
+                  <p style={{ fontSize: '10px', color: 'var(--text3)' }}>
+                    {weatherCond === 'rain' ? 'Rain surcharge applied' : 'No weather surcharge'}
+                  </p>
+                </div>
+              </div>
+              <span style={{
+                fontSize: '10px', fontWeight: 700, padding: '3px 8px', borderRadius: '20px',
+                background: weatherCond === 'rain' ? 'rgba(96,165,250,0.15)' : 'rgba(34,197,94,0.12)',
+                color: weatherCond === 'rain' ? '#60a5fa' : 'var(--green)',
+              }}>
+                {weatherCond === 'rain' ? '+surge' : '✓ Normal'}
+              </span>
+            </div>
+
+            {/* Road row */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 14px', borderRadius: '10px',
+              background: roadCond === 'good' ? 'rgba(34,197,94,0.07)' : 'rgba(249,115,22,0.07)',
+              border: `1px solid ${roadCond === 'good' ? 'rgba(34,197,94,0.2)' : 'rgba(249,115,22,0.25)'}`,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '20px' }}>{roadCond === 'good' ? '🛣️' : '🌙'}</span>
+                <div>
+                  <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text)' }}>
+                    {roadCond === 'good' ? 'Good road conditions' : 'Night driving (moderate)'}
+                  </p>
+                  <p style={{ fontSize: '10px', color: 'var(--text3)' }}>
+                    {roadCond === 'good' ? 'No road surcharge' : '+10% night visibility surcharge'}
+                  </p>
+                </div>
+              </div>
+              <span style={{
+                fontSize: '10px', fontWeight: 700, padding: '3px 8px', borderRadius: '20px',
+                background: roadCond === 'good' ? 'rgba(34,197,94,0.12)' : 'rgba(249,115,22,0.12)',
+                color: roadCond === 'good' ? 'var(--green)' : '#f97316',
+              }}>
+                {roadCond === 'good' ? '✓ Normal' : '+10%'}
+              </span>
+            </div>
+
+            {/* Rush hour row */}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 14px', borderRadius: '10px',
+              background: isRushHour() ? 'rgba(245,197,24,0.08)' : 'rgba(34,197,94,0.07)',
+              border: `1px solid ${isRushHour() ? 'rgba(245,197,24,0.3)' : 'rgba(34,197,94,0.2)'}`,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '20px' }}>{isRushHour() ? '⚡' : '🕐'}</span>
+                <div>
+                  <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text)' }}>
+                    {isRushHour() ? 'Rush hour active' : 'Off-peak time'}
+                  </p>
+                  <p style={{ fontSize: '10px', color: 'var(--text3)' }}>
+                    {isRushHour() ? 'Peak demand surcharge applied' : 'No time surcharge'}
+                  </p>
+                </div>
+              </div>
+              <span style={{
+                fontSize: '10px', fontWeight: 700, padding: '3px 8px', borderRadius: '20px',
+                background: isRushHour() ? 'rgba(245,197,24,0.15)' : 'rgba(34,197,94,0.12)',
+                color: isRushHour() ? 'var(--yellow)' : 'var(--green)',
+              }}>
+                {isRushHour() ? '+surge' : '✓ Normal'}
+              </span>
+            </div>
+
+            <p style={{ fontSize: '10px', color: 'var(--text3)', textAlign: 'center', marginTop: '2px' }}>
+              🤖 Conditions detected automatically from your location & time
+            </p>
           </div>
-        </div>
-        <div style={{ marginTop: '10px', padding: '9px 12px', background: 'var(--bg3)', borderRadius: '8px', border: '1px solid var(--border)' }}>
-          <p style={{ fontSize: '11px', color: 'var(--text3)', lineHeight: 1.7 }}>
-            {isRushHour()            && <span style={{ color: 'var(--yellow)', fontWeight: 700 }}>⚡ Rush hour · </span>}
-            {weatherCond === 'rain'  && <span style={{ color: '#60a5fa',      fontWeight: 700 }}>🌧️ Rain surge · </span>}
-            {roadCond    === 'poor'  && <span style={{ color: 'var(--red)',   fontWeight: 700 }}>❌ Poor road · </span>}
-            {roadCond    === 'moderate' && <span style={{ color: '#f97316',   fontWeight: 700 }}>⚠️ Moderate +10% · </span>}
-            {!isRushHour() && weatherCond === 'normal' && roadCond === 'good' ? '✅ Normal conditions' : 'Surcharges on km price'}
-          </p>
-        </div>
+        )}
       </div>
 
-      {/* ── EMERGENCY NOTE ── */}
+      {/* ── DELIVERY NOTE ── */}
       <div className="card">
-        <Sec icon={AlertCircle} title="Emergency Note (Optional)" color="var(--red)" />
+        <Sec icon={AlertCircle} title="Delivery Note (Optional)" color="#f97316" />
         <textarea className="eg-input" rows={2} placeholder="Special instructions or emergency contacts…" value={emergencyNote} onChange={e => setEmergencyNote(e.target.value)} style={{ resize: 'none' }} />
       </div>
 
