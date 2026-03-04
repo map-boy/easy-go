@@ -415,7 +415,7 @@ export function SenderOrderView({ onPriceRequest }: {
       ? (!!manualName && !validatePhone(manualPhone.code, manualPhone.number) && !validateDistrict(manualDistrict) && !!manualLocCoords)
       : false;
 
-  const allFilled = receiverReady && !!packageWeight && !!paymentMethod && !!payerName && !validatePhone(payerPhone.code, payerPhone.number);
+  const allFilled = receiverReady && !!packageWeight; // payment removed — was: && !!paymentMethod && !!payerName && !validatePhone(payerPhone.code, payerPhone.number)
 
   useEffect(() => {
     if (allFilled) calculatePrice();
@@ -493,102 +493,43 @@ export function SenderOrderView({ onPriceRequest }: {
         delivery_note: emergencyNote, is_night_delivery: isNight,
         is_fragile: isFragile, delivery_speed: deliverySpeed,
         weather_condition: weatherCond, road_condition: roadCond,
-        status: 'awaiting_payment', // hidden from drivers
-        sender_paid:   false,
+        status: 'pending', // payment bypassed — visible to drivers immediately
+        sender_paid:    true,  // payment bypassed
         payer_name:    payerName,
         payer_number:  `${payerPhone.code}${payerPhone.number}`,
       }).select().single();
       if (error) throw error;
 
-      // ── Request MoMo payment ──
-      setPaymentStep('requesting');
-      const { data: momoData, error: momoErr } = await supabase.functions.invoke('request-payment', {
-        body: {
-          orderId:     newOrder.id,
-          amount:      predictedPrice,
-          phoneNumber: `${payerPhone.code}${payerPhone.number}`,
-          payerName:   payerName,
-        },
-      });
-      if (momoErr || !momoData?.success) throw new Error(momoData?.error || 'MoMo request failed');
-
-      // ── Simulated payment (no MoMo creds) — already approved by Edge Function ──
-      if (momoData?.mode === 'simulated') {
-        setPaymentStep('paid');
-        setLoading(false);
-        setSuccess(true);
-        if (receiverId) {
-          await supabase.from('notifications').insert({
-            user_id: receiverId, title: '📦 Package coming your way!',
-            body: `${(profile as any).full_name} is sending you a package.`,
-            type: 'new_order', order_id: newOrder.id, read: false,
-          });
-        }
-        setReceiverHasApp(null); setSelectedReceiver(null); setSearchName('');
-        setManualName(''); setManualPhone({ code: '+250', number: '' });
-        setManualDistrict(''); setManualLocation(''); setManualLocCoords(null);
-        setPackageWeight(''); setEmergencyNote('');
-        setPayerName(''); setPayerPhone({ code: '+250', number: '' }); setPayerPhoneErr(null);
-        setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null);
-        setTimeout(() => { setSuccess(false); setPaymentStep(null); }, 5000);
-        return;
-      }
-
-      setPaymentStep('pending');
-
-      // ── Poll every 5 seconds until confirmed (real MoMo) ──
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        attempts++;
-        if (attempts > 24) { // 2 min timeout
-          clearInterval(poll);
-          setPaymentStep('timeout');
-          setLoading(false);
-          // Delete unpaid order
-          await supabase.from('orders').delete().eq('id', newOrder.id);
-          return;
-        }
-        const { data: checkData } = await supabase.functions.invoke('check-payment', {
-          body: { paymentId: momoData.paymentId, orderId: newOrder.id },
+      // ── PAYMENT BYPASSED — notify receiver and complete order ──
+      if (receiverId) {
+        await supabase.from('notifications').insert({
+          user_id: receiverId, title: '📦 Package coming your way!',
+          body: `${(profile as any).full_name} is sending you a package.`,
+          type: 'new_order', order_id: newOrder.id, read: false,
         });
-        if (checkData?.status === 'SUCCESSFUL') {
-          clearInterval(poll);
-          // Also update from frontend as a safety net
-          await supabase.from('orders').update({
-            sender_paid:    true,
-            payment_status: 'paid',
-            status:         'pending',
-            updated_at:     new Date().toISOString(),
-          }).eq('id', newOrder.id);
-          setPaymentStep('paid');
-          setLoading(false);
-          setSuccess(true);
-          // Notify receiver if they have app
-          if (receiverId) {
-            await supabase.from('notifications').insert({
-              user_id: receiverId, title: '📦 Package coming your way!',
-              body: `${(profile as any).full_name} is sending you a package.`,
-              type: 'new_order', order_id: newOrder.id, read: false,
-            });
-          }
-          // Reset form
-          setReceiverHasApp(null); setSelectedReceiver(null); setSearchName('');
-          setManualName(''); setManualPhone({ code: '+250', number: '' });
-          setManualDistrict(''); setManualLocation(''); setManualLocCoords(null);
-          setPackageWeight(''); setEmergencyNote('');
-        setPayerName(''); setPayerPhone({ code: '+250', number: '' }); setPayerPhoneErr(null);
-          setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null);
-          setTimeout(() => { setSuccess(false); setPaymentStep(null); }, 5000);
-        } else if (checkData?.status === 'FAILED') {
-          clearInterval(poll);
-          setPaymentStep('failed');
-          setLoading(false);
-          await supabase.from('orders').delete().eq('id', newOrder.id);
-        }
-      }, 5000);
+      }
+      setLoading(false);
+      setSuccess(true);
+      setReceiverHasApp(null); setSelectedReceiver(null); setSearchName('');
+      setManualName(''); setManualPhone({ code: '+250', number: '' });
+      setManualDistrict(''); setManualLocation(''); setManualLocCoords(null);
+      setPackageWeight(''); setEmergencyNote('');
+      // setPayerName(''); setPayerPhone({ code: '+250', number: '' }); setPayerPhoneErr(null); // payment fields — restore when adding payment back
+      setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null);
+      setTimeout(() => setSuccess(false), 5000);
+
+      // ── MoMo payment — commented out, restore when adding payment back ──
+      // setPaymentStep('requesting');
+      // const { data: momoData, error: momoErr } = await supabase.functions.invoke('request-payment', {
+      //   body: { orderId: newOrder.id, amount: predictedPrice, phoneNumber: `${payerPhone.code}${payerPhone.number}`, payerName },
+      // });
+      // if (momoErr || !momoData?.success) throw new Error(momoData?.error || 'MoMo request failed');
+      // setPaymentStep('pending');
+      // const poll = setInterval(async () => { ... check-payment polling ... }, 5000);
+
     } catch (err: any) {
       console.error(err);
-      setPaymentStep('error');
+      // setPaymentStep('error'); // restore when adding payment back
       setLoading(false);
       alert('Error: ' + err.message);
     }
@@ -1015,7 +956,7 @@ export function SenderOrderView({ onPriceRequest }: {
         <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '14px', padding: '18px', textAlign: 'center' }}>
           <p style={{ fontSize: '13px', color: 'var(--text3)', fontWeight: 600, marginBottom: '12px' }}>📋 Complete all steps to see AI price</p>
           <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
-            {[{ label:'Receiver', done: receiverReady },{ label:'Package', done: !!packageWeight },{ label:'Payer info', done: !!payerName && !validatePhone(payerPhone.code, payerPhone.number) }].map(c => (
+              // {[{ label:'Receiver', done: receiverReady },{ label:'Package', done: !!packageWeight },{ label:'Payer info', done: !!payerName && !validatePhone(payerPhone.code, payerPhone.number) }].map(c => (
               <span key={c.label} style={{ fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: '20px', background: c.done ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.06)', color: c.done ? 'var(--green)' : 'var(--text3)', border: `1px solid ${c.done ? 'rgba(34,197,94,0.25)' : 'var(--border)'}` }}>
                 {c.done ? '✓' : '○'} {c.label}
               </span>
@@ -1058,12 +999,15 @@ export function SenderOrderView({ onPriceRequest }: {
       )}
 
       {/* ── PAYMENT STATUS MESSAGES ── */}
+      {/* PAYMENT STEP BANNERS — restore when adding payment back
       {paymentStep === 'requesting' && (
         <div style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: '12px', padding: '16px', display: 'flex', alignItems: 'center', gap: '12px' }}>
           <div className="spinner" />
           <p style={{ fontSize: '13px', color: 'var(--blue)', fontWeight: 600 }}>Sending MoMo request to your phone…</p>
         </div>
       )}
+      */}
+      {/* PAYMENT STEP BANNERS — restore when adding payment back
       {paymentStep === 'pending' && (
         <div style={{ background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.3)', borderRadius: '12px', padding: '16px' }}>
           <p style={{ fontSize: '14px', fontWeight: 800, color: 'var(--yellow)', marginBottom: '6px' }}>📱 Check your phone!</p>
@@ -1076,6 +1020,8 @@ export function SenderOrderView({ onPriceRequest }: {
           </div>
         </div>
       )}
+      */}
+      {/* PAYMENT STEP BANNERS — restore when adding payment back
       {paymentStep === 'paid' && (
         <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '12px', padding: '16px', textAlign: 'center' }}>
           <p style={{ fontSize: '22px', marginBottom: '6px' }}>✅</p>
@@ -1083,6 +1029,8 @@ export function SenderOrderView({ onPriceRequest }: {
           <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '4px' }}>Your order is live — a driver will accept shortly.</p>
         </div>
       )}
+      */}
+      {/* PAYMENT STEP BANNERS — restore when adding payment back
       {paymentStep === 'failed' && (
         <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '12px', padding: '16px' }}>
           <p style={{ fontSize: '14px', fontWeight: 800, color: 'var(--red)', marginBottom: '4px' }}>❌ Payment declined or failed</p>
@@ -1090,6 +1038,8 @@ export function SenderOrderView({ onPriceRequest }: {
           <button type="button" onClick={() => setPaymentStep(null)} style={{ padding: '8px 16px', background: 'var(--red)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 700, cursor: 'pointer', fontSize: '12px' }}>Try Again</button>
         </div>
       )}
+      */}
+      {/* PAYMENT STEP BANNERS — restore when adding payment back
       {paymentStep === 'timeout' && (
         <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '12px', padding: '16px' }}>
           <p style={{ fontSize: '14px', fontWeight: 800, color: 'var(--red)', marginBottom: '4px' }}>⏱️ Payment timed out</p>
@@ -1097,21 +1047,20 @@ export function SenderOrderView({ onPriceRequest }: {
           <button type="button" onClick={() => setPaymentStep(null)} style={{ padding: '8px 16px', background: 'var(--yellow)', border: 'none', borderRadius: '8px', color: '#000', fontWeight: 700, cursor: 'pointer', fontSize: '12px' }}>Try Again</button>
         </div>
       )}
+      */}
 
-      {/* ── SUBMIT BUTTON — hidden while payment processing ── */}
-      {!paymentStep && (
-        <button type="submit" className="btn-yellow"
-          disabled={loading || priceLoading || !priceReady}
-          style={{ fontSize: '15px', padding: '13px' }}>
-          {loading       ? 'Processing…'       :
-           !priceReady   ? 'Fill all fields first' :
-           `📱 Pay ${predictedPrice.toLocaleString()} RWF & Place Order`}
-        </button>
-      )}
+      {/* ── SUBMIT BUTTON ── */}
+      <button type="submit" className="btn-yellow"
+        disabled={loading || priceLoading || !priceReady}
+        style={{ fontSize: '15px', padding: '13px' }}>
+        {loading     ? '⏳ Placing order…'     :
+         !priceReady ? 'Fill all fields first' :
+         `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF`}
+      </button>
 
-      {priceReady && !paymentStep && (
+      {priceReady && (
         <p style={{ fontSize: '11px', color: 'var(--text3)', textAlign: 'center', marginTop: '-6px' }}>
-          MoMo prompt will be sent to <strong>{payerPhone.code} {payerPhone.number}</strong> ({payerName})
+          💡 Payment collected on delivery — cash or MoMo
         </p>
       )}
 

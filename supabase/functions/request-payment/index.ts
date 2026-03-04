@@ -36,7 +36,6 @@ serve(async (req) => {
 
     const hasMomoCreds = SUB_KEY && API_USER && API_KEY
 
-    // ── SIMULATION MODE: no creds or creds not working ──
     async function simulatePayment(reason: string) {
       console.log(`Simulation mode (${reason}) for order:`, orderId)
       const paymentId = crypto.randomUUID()
@@ -56,7 +55,6 @@ serve(async (req) => {
       return simulatePayment('no credentials')
     }
 
-    // ── REAL MoMo flow ──
     const tokenRes = await fetch(`${MOMO_BASE}/collection/token/`, {
       method: 'POST',
       headers: {
@@ -101,7 +99,14 @@ serve(async (req) => {
       return simulatePayment(`momo rejected ${payRes.status}`)
     }
 
-    await supabase.from('orders').update({ momo_payment_id: paymentId }).eq('id', orderId)
+    // ✅ FIX: update status to 'pending' so drivers can see the order
+    await supabase.from('orders').update({
+      momo_payment_id: paymentId,
+      payer_name:      payerName ?? '',
+      payer_number:    phone,
+      status:          'pending',
+      updated_at:      new Date().toISOString(),
+    }).eq('id', orderId)
 
     return new Response(JSON.stringify({ success: true, paymentId, mode: 'real' }), {
       headers: { ...cors, 'Content-Type': 'application/json' },
