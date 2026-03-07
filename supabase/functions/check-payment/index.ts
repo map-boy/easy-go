@@ -1,17 +1,14 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-
-const MOMO_BASE  = 'https://sandbox.momodeveloper.mtn.com'
-const SUB_KEY    = Deno.env.get('MOMO_SUBSCRIPTION_KEY') ?? ''
-const API_USER   = Deno.env.get('MOMO_API_USER') ?? ''
-const API_KEY    = Deno.env.get('MOMO_API_KEY') ?? ''
-const TARGET_ENV = 'sandbox'
 
 const cors = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
+
+// ── This edge function now just proxies to Noor ───────────────────────────
+// Noor handles MTN MoMo and updates the order in Supabase automatically
+// Easy GO just needs to poll this for the status
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -21,90 +18,39 @@ serve(async (req) => {
   try {
     const body = await req.json()
 
+    // Ping check
     if (body.__ping) {
       return new Response(JSON.stringify({ ok: true }), {
         headers: { ...cors, 'Content-Type': 'application/json' },
       })
     }
 
-    const { paymentId, orderId } = body
+    const { transactionId } = body
 
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    )
-
-    const hasMomoCreds = SUB_KEY && API_USER && API_KEY
-
-    // ✅ FIX: if no creds, treat as paid so drivers see the order
-    if (!hasMomoCreds) {
-      await supabase.from('orders').update({
-        sender_paid:    true,
-        payment_status: 'paid',
-        status:         'pending',
-        updated_at:     new Date().toISOString(),
-      }).eq('id', orderId)
-      return new Response(JSON.stringify({ status: 'SUCCESSFUL', mode: 'simulated' }), {
+    if (!transactionId) {
+      return new Response(JSON.stringify({ error: 'transactionId is required' }), {
+        status: 400,
         headers: { ...cors, 'Content-Type': 'application/json' },
       })
     }
 
-    const tokenRes = await fetch(`${MOMO_BASE}/collection/token/`, {
-      method: 'POST',
-      headers: {
-        'Authorization':             `Basic ${btoa(`${API_USER}:${API_KEY}`)}`,
-        'Ocp-Apim-Subscription-Key': SUB_KEY,
-      },
+    const NOOR_URL = Deno.env.get('NOOR_URL') || 'http://localhost:3001'
+    const NOOR_KEY = Deno.env.get('NOOR_API_KEY') || ''
+
+    // Ask Noor for the payment status
+    const res = await fetch(`${NOOR_URL}/payments/status/${transactionId}`, {
+      headers: { 'x-api-key': NOOR_KEY },
     })
 
-    if (!tokenRes.ok) {
-      // token failed — fallback: mark pending so order is visible
-      await supabase.from('orders').update({
-        sender_paid:    true,
-        payment_status: 'paid',
-        status:         'pending',
-        updated_at:     new Date().toISOString(),
-      }).eq('id', orderId)
-      return new Response(JSON.stringify({ status: 'SUCCESSFUL', mode: 'token-fallback' }), {
+    if (!res.ok) {
+      return new Response(JSON.stringify({ status: 'PENDING' }), {
         headers: { ...cors, 'Content-Type': 'application/json' },
       })
     }
 
-    const { access_token } = await tokenRes.json()
+    const data = await res.json()
 
-    const statusRes = await fetch(
-      `${MOMO_BASE}/collection/v1_0/requesttopay/${paymentId}`,
-      {
-        headers: {
-          'Authorization':             `Bearer ${access_token}`,
-          'X-Target-Environment':      TARGET_ENV,
-          'Ocp-Apim-Subscription-Key': SUB_KEY,
-        },
-      }
-    )
-
-    const result = await statusRes.json()
-    console.log('Payment status for', paymentId, ':', result.status)
-
-    // ✅ FIX: SUCCESSFUL = fully paid | PENDING = sandbox fallback, still show to drivers
-    if (result.status === 'SUCCESSFUL' || result.status === 'PENDING') {
-      await supabase.from('orders').update({
-        sender_paid:    result.status === 'SUCCESSFUL',
-        payment_status: result.status === 'SUCCESSFUL' ? 'paid' : 'pending',
-        status:         'pending',   // visible to drivers either way
-        updated_at:     new Date().toISOString(),
-      }).eq('id', orderId)
-    }
-
-    if (result.status === 'FAILED') {
-      await supabase.from('orders').update({
-        payment_status: 'failed',
-        status:         'awaiting_payment',
-        updated_at:     new Date().toISOString(),
-      }).eq('id', orderId)
-    }
-
-    return new Response(JSON.stringify({ status: result.status }), {
+    return new Response(JSON.stringify({ status: data.status }), {
       headers: { ...cors, 'Content-Type': 'application/json' },
     })
 

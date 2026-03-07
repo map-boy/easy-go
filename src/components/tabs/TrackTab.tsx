@@ -283,26 +283,60 @@ export function TrackTab() {
     }
   }
 
-  // ── MoMo payment ──────────────────────────────────────────────────────────
+  // ── MoMo payment via Noor ────────────────────────────────────────────────
   async function handlePay(orderId: string) {
     const order = orders.find(o => o.id === orderId);
     if (!order || !profile) return;
     setPayingId(orderId);
     setPayStatus(s => ({ ...s, [orderId]: 'requesting' }));
     try {
-      const { data, error } = await supabase.functions.invoke('request-payment', {
-        body: { orderId, amount: order.predicted_price, phoneNumber: (profile as any).phone_number, payerName: profile.full_name },
+      const NOOR_URL = (import.meta as any).env?.VITE_NOOR_URL || 'http://localhost:3001';
+      const NOOR_KEY = (import.meta as any).env?.VITE_NOOR_API_KEY || '';
+
+      // Step 1: Request payment from Noor
+      const res = await fetch(`${NOOR_URL}/api/payments/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': NOOR_KEY },
+        body: JSON.stringify({
+          orderId,
+          amount:      order.predicted_price,
+          phoneNumber: (profile as any).phone_number,
+          payerName:   profile.full_name,
+        }),
       });
-      if (error || !data?.success) throw new Error('Failed');
+      const data = await res.json();
+      if (!res.ok || !data.transactionId) throw new Error(data.error || 'Noor request failed');
+
       setPayStatus(s => ({ ...s, [orderId]: 'pending' }));
+
+      // Step 2: Poll Noor every 5s for payment status
       let attempts = 0;
       const poll = setInterval(async () => {
         attempts++;
-        if (attempts > 24) { clearInterval(poll); setPayStatus(s => ({ ...s, [orderId]: 'timeout' })); setPayingId(null); return; }
-        const { data: chk } = await supabase.functions.invoke('check-payment', { body: { paymentId: data.paymentId, orderId } });
-        if (chk?.status === 'SUCCESSFUL') { clearInterval(poll); setPayStatus(s => ({ ...s, [orderId]: 'paid' })); setPayingId(null); loadOrders(); }
-        else if (chk?.status === 'FAILED') { clearInterval(poll); setPayStatus(s => ({ ...s, [orderId]: 'failed' })); setPayingId(null); }
+        if (attempts > 24) {
+          clearInterval(poll);
+          setPayStatus(s => ({ ...s, [orderId]: 'timeout' }));
+          setPayingId(null);
+          return;
+        }
+        try {
+          const chkRes = await fetch(`${NOOR_URL}/api/payments/status/${data.transactionId}`, {
+            headers: { 'x-api-key': NOOR_KEY },
+          });
+          const chk = await chkRes.json();
+          if (chk.status === 'SUCCESSFUL') {
+            clearInterval(poll);
+            setPayStatus(s => ({ ...s, [orderId]: 'paid' }));
+            setPayingId(null);
+            loadOrders();
+          } else if (chk.status === 'FAILED') {
+            clearInterval(poll);
+            setPayStatus(s => ({ ...s, [orderId]: 'failed' }));
+            setPayingId(null);
+          }
+        } catch { /* keep polling */ }
       }, 5000);
+
     } catch { setPayStatus(s => ({ ...s, [orderId]: 'failed' })); setPayingId(null); }
   }
 

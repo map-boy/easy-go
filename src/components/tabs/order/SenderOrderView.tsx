@@ -32,6 +32,7 @@ const COUNTRY_CODES = [
   { code: '+44',  flag: '🇬🇧', name: 'UK' },
   { code: '+33',  flag: '🇫🇷', name: 'France' },
   { code: '+49',  flag: '🇩🇪', name: 'Germany' },
+  { code: '+46',  flag: '🧪', name: 'Sandbox Test' },
 ];
 
 function validatePhone(code: string, number: string): string | null {
@@ -41,7 +42,7 @@ function validatePhone(code: string, number: string): string | null {
     if (d.length !== 9) return 'Rwanda numbers need exactly 9 digits after +250';
     if (!['7','2'].includes(d[0])) return 'Must start with 7 or 2';
   } else {
-    if (d.length < 7 || d.length > 12) return 'Enter 7–12 digits';
+    if (d.length < 7 || d.length > 15) return 'Enter 7–15 digits';
   }
   return null;
 }
@@ -175,9 +176,15 @@ function LocationInput({ value, onChange, district, onValidated, error, setError
       setLoading(true);
       try {
         const q = encodeURIComponent(`${value}, ${district || 'Kigali'}, Rwanda`);
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=6&countrycodes=rw&addressdetails=1`, { headers: { 'Accept-Language': 'en', 'User-Agent': 'EasyGO-App/1.0' } });
+        const res = await fetch(`https://photon.komoot.io/api/?q=${q}&limit=6&bbox=28.8,-2.9,30.9,-1.0&lang=en`);
         const data = await res.json();
-        setSuggestions(data); setShow(data.length > 0);
+        const formatted = (data.features || []).map((f: any) => ({
+          lat: String(f.geometry.coordinates[1]),
+          lon: String(f.geometry.coordinates[0]),
+          display_name: [f.properties.name, f.properties.street, f.properties.city || 'Kigali', 'Rwanda'].filter(Boolean).join(', '),
+          address: { road: f.properties.street || f.properties.name, suburb: f.properties.district, city: f.properties.city || 'Kigali', city_district: f.properties.district }
+        }));
+        setSuggestions(formatted); setShow(formatted.length > 0);
       } catch { setSuggestions([]); }
       setLoading(false);
     }, 500);
@@ -400,32 +407,55 @@ export function SenderOrderView({ onPriceRequest }: {
         weather_condition: weatherCond, road_condition: roadCond,
         payer_name:    payerName,
         payer_number:  `${payerPhone.code}${payerPhone.number}`,
-        // ── BYPASS: mark paid immediately so drivers see it ──
-        status:         'pending',
-        sender_paid:    true,
-        payment_status: 'paid',
+        // ── Wait for Noor payment before drivers see it ──
+        status:         'awaiting_payment',
+        sender_paid:    false,
+        payment_status: 'awaiting_payment',
       }).select().single();
       if (error) throw error;
 
-      // ── COMMENTED OUT: MoMo payment — uncomment when ready ──
-      // setPaymentStep('requesting');
-      // const { data: momoData, error: momoErr } = await supabase.functions.invoke('request-payment', {
-      //   body: { orderId: newOrder.id, amount: predictedPrice, phoneNumber: `${payerPhone.code}${payerPhone.number}`, payerName },
-      // });
-      // if (momoErr || !momoData?.success) throw new Error(momoData?.error || 'MoMo request failed');
-      // if (momoData?.mode === 'simulated') { setPaymentStep('paid'); ... }
-      // setPaymentStep('pending');
-      // let attempts = 0;
-      // const poll = setInterval(async () => {
-      //   attempts++;
-      //   if (attempts > 24) { clearInterval(poll); setPaymentStep('timeout'); ... return; }
-      //   const { data: chk } = await supabase.functions.invoke('check-payment', { body: { paymentId: momoData.paymentId, orderId: newOrder.id } });
-      //   if (chk?.status === 'SUCCESSFUL') { clearInterval(poll); setPaymentStep('paid'); ... }
-      //   else if (chk?.status === 'FAILED') { clearInterval(poll); setPaymentStep('failed'); ... }
-      // }, 5000);
+      // ── Noor MoMo Payment ─────────────────────────────────────────────────
+      setPaymentStep('requesting');
+      const NOOR_URL = (import.meta as any).env?.VITE_NOOR_URL || 'http://localhost:3001';
+      const NOOR_KEY = (import.meta as any).env?.VITE_NOOR_API_KEY || '';
 
-      // ── BYPASS: jump straight to success ──
-      setPaymentStep('paid');
+      const noorRes = await fetch(`${NOOR_URL}/api/payments/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': NOOR_KEY },
+        body: JSON.stringify({
+          orderId:     newOrder.id,
+          amount:      predictedPrice,
+          phoneNumber: `${payerPhone.code}${payerPhone.number}`,
+          payerName,
+        }),
+      });
+      const noorData = await noorRes.json();
+      if (!noorRes.ok || !noorData.transactionId) throw new Error(noorData.error || 'Payment request failed');
+
+      setPaymentStep('pending');
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        if (attempts > 24) {
+          clearInterval(poll);
+          setPaymentStep('timeout');
+          return;
+        }
+        try {
+          const chkRes = await fetch(`${NOOR_URL}/api/payments/status/${noorData.transactionId}`, {
+            headers: { 'x-api-key': NOOR_KEY },
+          });
+          const chk = await chkRes.json();
+          if (chk.status === 'SUCCESSFUL') {
+            clearInterval(poll);
+            setPaymentStep('paid');
+          } else if (chk.status === 'FAILED') {
+            clearInterval(poll);
+            setPaymentStep('failed');
+          }
+        } catch { /* keep polling */ }
+      }, 5000);
+      return; // wait for polling to finish
       setLoading(false);
       setSuccess(true);
       if (receiverId) {
@@ -743,21 +773,71 @@ export function SenderOrderView({ onPriceRequest }: {
         </div>
       )}
 
-      {/* ── SUBMIT — no paymentStep guard, always shows ── */}
+      {/* ── PAYMENT STATUS UI ── */}
+      {paymentStep === 'requesting' && (
+        <div style={{ background: 'rgba(255,214,0,0.08)', border: '1px solid rgba(255,214,0,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
+          <div className="spinner" style={{ width: '32px', height: '32px', margin: '0 auto 12px' }} />
+          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text)' }}>⏳ Connecting to MTN MoMo…</p>
+          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Sending payment request to your phone</p>
+        </div>
+      )}
+
+      {paymentStep === 'pending' && (
+        <div style={{ background: 'rgba(255,214,0,0.08)', border: '1px solid rgba(255,214,0,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
+          <p style={{ fontSize: '32px', marginBottom: '8px' }}>📱</p>
+          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text)' }}>Check your phone!</p>
+          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Approve the MTN MoMo payment prompt on your phone</p>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', marginTop: '12px' }}>
+            <div className="spinner" style={{ width: '14px', height: '14px' }} />
+            <span style={{ fontSize: '11px', color: 'var(--text3)' }}>Waiting for approval…</span>
+          </div>
+        </div>
+      )}
+
+      {paymentStep === 'paid' && (
+        <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
+          <p style={{ fontSize: '32px', marginBottom: '8px' }}>✅</p>
+          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--green)' }}>Payment successful!</p>
+          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Your order is now visible to drivers 🚀</p>
+        </div>
+      )}
+
+      {paymentStep === 'failed' && (
+        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
+          <p style={{ fontSize: '32px', marginBottom: '8px' }}>❌</p>
+          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--red)' }}>Payment failed</p>
+          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Please try again</p>
+          <button type="button" onClick={() => setPaymentStep(null)} style={{ marginTop: '12px', padding: '8px 20px', borderRadius: '8px', background: 'var(--yellow)', border: 'none', fontWeight: 700, cursor: 'pointer', fontSize: '13px' }}>Try Again</button>
+        </div>
+      )}
+
+      {paymentStep === 'timeout' && (
+        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
+          <p style={{ fontSize: '32px', marginBottom: '8px' }}>⏰</p>
+          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--red)' }}>Payment timed out</p>
+          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>You did not approve in time. Please try again.</p>
+          <button type="button" onClick={() => setPaymentStep(null)} style={{ marginTop: '12px', padding: '8px 20px', borderRadius: '8px', background: 'var(--yellow)', border: 'none', fontWeight: 700, cursor: 'pointer', fontSize: '13px' }}>Try Again</button>
+        </div>
+      )}
+
+      {paymentStep === 'error' && (
+        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
+          <p style={{ fontSize: '32px', marginBottom: '8px' }}>⚠️</p>
+          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--red)' }}>Something went wrong</p>
+          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Please try again</p>
+          <button type="button" onClick={() => setPaymentStep(null)} style={{ marginTop: '12px', padding: '8px 20px', borderRadius: '8px', background: 'var(--yellow)', border: 'none', fontWeight: 700, cursor: 'pointer', fontSize: '13px' }}>Try Again</button>
+        </div>
+      )}
+
+      {/* ── SUBMIT — only show when no payment in progress ── */}
       {!paymentStep && (
         <button type="submit" className="btn-yellow"
           disabled={loading || priceLoading || !priceReady}
           style={{ fontSize: '15px', padding: '13px' }}>
           {loading     ? '⏳ Placing order…'      :
            !priceReady ? 'Fill all fields first'  :
-           `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF`}
+           `🚀 Place Order & Pay — ${predictedPrice.toLocaleString()} RWF`}
         </button>
-      )}
-
-      {priceReady && !paymentStep && (
-        <p style={{ fontSize: '11px', color: 'var(--text3)', textAlign: 'center', marginTop: '-6px' }}>
-          💡 MoMo payment integration coming soon — order placed instantly for now
-        </p>
       )}
 
     </form>
