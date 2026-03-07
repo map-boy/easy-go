@@ -1,8 +1,8 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { MapPin, Package, CheckCircle, Clock, AlertCircle, Phone } from 'lucide-react';
+import { MapPin, Package, CheckCircle, Clock, AlertCircle, Phone, Search, Filter, User, Truck, BarChart2, X, ChevronDown, ChevronUp } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -108,11 +108,11 @@ async function geocode(loc: string, district?: string): Promise<[number, number]
   try {
     const q   = encodeURIComponent([loc.trim(), district, 'Rwanda'].filter(Boolean).join(', '));
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1&countrycodes=rw`,
-      { headers: { 'Accept-Language': 'en', 'User-Agent': 'EasyGO/1.0' } }
+      `https://photon.komoot.io/api/?q=${q}&limit=1&bbox=28.8,-2.9,30.9,-1.0&lang=en`
     );
     const d = await res.json();
-    return d.length ? [parseFloat(d[0].lat), parseFloat(d[0].lon)] : null;
+    const f = d.features?.[0];
+    return f ? [f.geometry.coordinates[1], f.geometry.coordinates[0]] : null;
   } catch { return null; }
 }
 
@@ -146,6 +146,15 @@ export function TrackTab() {
   const [loading,   setLoading]   = useState(true);
   const [payStatus, setPayStatus] = useState<Record<string, string>>({});
   const [payingId,  setPayingId]  = useState<string | null>(null);
+
+  // ── NEW: filters, search, selected order, active tab ──────────────────────
+  const [searchQ,       setSearchQ]       = useState('');
+  const [filterStatus,  setFilterStatus]  = useState('all');
+  const [filterDriver,  setFilterDriver]  = useState('all');
+  const [selectedOrder, setSelectedOrder] = useState<any>(null);
+  const [activeTab,     setActiveTab]     = useState<'map'|'deliveries'|'drivers'|'stats'>('map');
+  const [showFilters,   setShowFilters]   = useState(false);
+  const [drivers,       setDrivers]       = useState<any[]>([]);
 
   // Routes for active order
   const [routeM2S, setRouteM2S] = useState<any>(null); // motari → sender
@@ -185,9 +194,10 @@ export function TrackTab() {
 
   async function reverseGeocode(lat: number, lng: number) {
     try {
-      const res  = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`);
+      const res  = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lng}&limit=1`);
       const data = await res.json();
-      const parts = [data.address?.suburb || data.address?.neighbourhood, data.address?.city || data.address?.town].filter(Boolean);
+      const f = data.features?.[0]?.properties;
+      const parts = [f?.district || f?.suburb, f?.city || f?.town || 'Kigali'].filter(Boolean);
       setLocationName(parts.join(', ') || 'Rwanda');
     } catch { setLocationName(`${lat.toFixed(4)}, ${lng.toFixed(4)}`); }
   }
@@ -340,6 +350,19 @@ export function TrackTab() {
     } catch { setPayStatus(s => ({ ...s, [orderId]: 'failed' })); setPayingId(null); }
   }
 
+  // ── Load drivers ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    supabase.from('drivers').select('*, profiles:user_id(full_name, phone_number)').then(({ data }) => {
+      if (data) setDrivers(data);
+    });
+    const ch = supabase.channel('drivers-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'drivers' }, async () => {
+        const { data } = await supabase.from('drivers').select('*, profiles:user_id(full_name, phone_number)');
+        if (data) setDrivers(data);
+      }).subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, []);
+
   // ── Derived ───────────────────────────────────────────────────────────────
   const activeOrder = orders.find(o => ['accepted', 'in_transit'].includes(o.status));
   const hasActiveOrder = orders.some(o => ['awaiting_payment', 'pending', 'accepted', 'in_transit'].includes(o.status));
@@ -357,6 +380,60 @@ export function TrackTab() {
   const mapCenter: [number, number] = myLocation ?? KIGALI;
 
   // ── RENDER ────────────────────────────────────────────────────────────────
+
+  // Filtered orders
+  const filteredOrders = orders.filter(o => {
+    const matchSearch = !searchQ ||
+      o.id.toLowerCase().includes(searchQ.toLowerCase()) ||
+      o.sender_name?.toLowerCase().includes(searchQ.toLowerCase()) ||
+      o.receiver_name?.toLowerCase().includes(searchQ.toLowerCase()) ||
+      o.sender_location?.toLowerCase().includes(searchQ.toLowerCase()) ||
+      o.receiver_location?.toLowerCase().includes(searchQ.toLowerCase());
+    const matchStatus = filterStatus === 'all' || o.status === filterStatus;
+    const matchDriver = filterDriver === 'all' || o.driver_name === filterDriver;
+    return matchSearch && matchStatus && matchDriver;
+  });
+
+  // Stats
+  const stats = {
+    active:    orders.filter(o => ['pending','accepted','in_transit'].includes(o.status)).length,
+    delivered: orders.filter(o => o.status === 'delivered').length,
+    delayed:   orders.filter(o => {
+      if (!o.created_at) return false;
+      const age = (Date.now() - new Date(o.created_at).getTime()) / 60000;
+      return ['pending','accepted'].includes(o.status) && age > 60;
+    }).length,
+    avgTime: (() => {
+      const done = orders.filter(o => o.status === 'delivered' && o.created_at && o.updated_at);
+      if (!done.length) return 0;
+      const avg = done.reduce((s, o) => s + (new Date(o.updated_at).getTime() - new Date(o.created_at).getTime()), 0) / done.length;
+      return Math.round(avg / 60000);
+    })(),
+  };
+
+  // Unique drivers in orders
+  const uniqueDrivers = [...new Set(orders.map(o => o.driver_name).filter(Boolean))];
+
+  // Timeline steps
+  function getTimeline(order: any) {
+    const steps = [
+      { key: 'received',   label: 'Order Received',    icon: '📋', done: true },
+      { key: 'paid',       label: 'Payment Confirmed',  icon: '💰', done: order.sender_paid },
+      { key: 'accepted',   label: 'Driver Assigned',    icon: '🏍️', done: ['accepted','in_transit','delivered'].includes(order.status) },
+      { key: 'in_transit', label: 'In Transit',         icon: '🚀', done: ['in_transit','delivered'].includes(order.status) },
+      { key: 'delivered',  label: 'Delivered',          icon: '✅', done: order.status === 'delivered' },
+    ];
+    return steps;
+  }
+
+  const tabStyle = (t: string) => ({
+    flex: 1, padding: '10px 4px', border: 'none', borderRadius: '10px', cursor: 'pointer',
+    fontFamily: 'Space Grotesk, sans-serif', fontSize: '11px', fontWeight: 700,
+    background: activeTab === t ? 'var(--yellow)' : 'transparent',
+    color: activeTab === t ? '#0a0a0a' : 'var(--text3)',
+    transition: 'all .2s',
+  } as React.CSSProperties);
+
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100vh' }}>
       <style>{`
@@ -364,290 +441,386 @@ export function TrackTab() {
         @keyframes tt-dot { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.4;transform:scale(.65);} }
       `}</style>
 
-      {/* ══════════ LIVE MAP ══════════ */}
-      <div style={{ position: 'relative', height: '360px', width: '100%' }}>
-        <MapContainer center={mapCenter} zoom={myLocation ? 14 : 13} style={{ height: '100%', width: '100%' }} zoomControl={false} scrollWheelZoom={true} attributionControl={false}>
-          <TileLayer url={MAP_STYLES[mapStyle].url} maxZoom={19} />
-
-          {myLocation && !activeOrder && <MapFollower pos={myLocation} />}
-          {allMapPositions.length >= 2 && <MapBounds positions={allMapPositions} />}
-
-          {/* ── ROUTE LINES ── */}
-          {/* Motari → Sender: yellow dashed (heading to pickup) */}
-          {routeM2S?.points && activeOrder?.status !== 'in_transit' && (
-            <Polyline positions={routeM2S.points} color="#f5c518" weight={5} opacity={0.9} dashArray="10 6" />
-          )}
-          {/* Motari → Receiver: solid blue (in transit) */}
-          {routeM2R?.points && activeOrder?.status === 'in_transit' && (
-            <Polyline positions={routeM2R.points} color="#3b82f6" weight={5} opacity={0.9} />
-          )}
-          {/* Sender → Receiver: green dashed (full route overview) */}
-          {routeS2R?.points && (
-            <Polyline positions={routeS2R.points} color="#22c55e" weight={3} opacity={0.5} dashArray="6 6" />
-          )}
-
-          {/* ── MY LOCATION (pulsing blue dot) ── */}
-          {myLocation && (
-            <Marker position={myLocation} icon={meIcon}>
-              <Popup>
-                <div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '150px' }}>
-                  <p style={{ fontWeight: 800, fontSize: '13px', marginBottom: '4px' }}>
-                    {isMotari ? '🏍️ You (Motari)' : '📍 You are here'}
-                  </p>
-                  <p style={{ fontSize: '12px', color: '#555' }}>{locationName}</p>
-                  {accuracy && <p style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>GPS ±{accuracy}m</p>}
-                </div>
-              </Popup>
-            </Marker>
-          )}
-
-          {/* ── DRIVER marker (for sender/receiver view) ── */}
-          {!isMotari && activeOrder?.driverPos && (
-            <Marker position={activeOrder.driverPos} icon={driverIcon}>
-              <Popup>
-                <div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '170px' }}>
-                  <p style={{ fontWeight: 800, fontSize: '14px', marginBottom: '6px' }}>🏍️ Your Motari</p>
-                  <p style={{ fontSize: '13px', fontWeight: 700 }}>{activeOrder.driver_name || 'Driver'}</p>
-                  {activeOrder.driver_phone && <p style={{ fontSize: '12px', color: '#555', marginTop: '3px' }}>📞 <a href={`tel:${activeOrder.driver_phone}`} style={{ color: '#2563eb' }}>{activeOrder.driver_phone}</a></p>}
-                  {activeOrder.driver_plate && <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>🪪 {activeOrder.driver_plate}</p>}
-                </div>
-              </Popup>
-            </Marker>
-          )}
-
-          {/* ── SENDER marker ── */}
-          {activeOrder?.senderPos && (
-            <Marker position={activeOrder.senderPos} icon={senderIcon}>
-              <Popup>
-                <div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '160px' }}>
-                  <p style={{ fontWeight: 800, fontSize: '14px', marginBottom: '6px' }}>📤 Sender / Pickup</p>
-                  <p style={{ fontSize: '13px', fontWeight: 700 }}>{activeOrder.sender_name}</p>
-                  <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>📞 {activeOrder.sender_number}</p>
-                  <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>📍 {activeOrder.sender_location}</p>
-                  {routeM2S && activeOrder.status !== 'in_transit' && (
-                    <p style={{ fontSize: '11px', color: '#f5c518', fontWeight: 700, marginTop: '6px' }}>
-                      🏍️ {routeM2S.distanceKm} km · ~{routeM2S.durationMin} min away
-                    </p>
-                  )}
-                </div>
-              </Popup>
-            </Marker>
-          )}
-
-          {/* ── RECEIVER marker ── */}
-          {activeOrder?.receiverPos && (
-            <Marker position={activeOrder.receiverPos} icon={receiverIcon}>
-              <Popup>
-                <div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '160px' }}>
-                  <p style={{ fontWeight: 800, fontSize: '14px', marginBottom: '6px' }}>📥 Receiver / Dropoff</p>
-                  <p style={{ fontSize: '13px', fontWeight: 700 }}>{activeOrder.receiver_name}</p>
-                  <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>📞 {activeOrder.receiver_number}</p>
-                  <p style={{ fontSize: '12px', color: '#555', marginTop: '2px' }}>📍 {activeOrder.receiver_location}</p>
-                  {routeS2R && (
-                    <p style={{ fontSize: '11px', color: '#22c55e', fontWeight: 700, marginTop: '6px' }}>
-                      Total route: {routeS2R.distanceKm} km · ~{routeS2R.durationMin} min
-                    </p>
-                  )}
-                </div>
-              </Popup>
-            </Marker>
-          )}
-        </MapContainer>
-
-        {/* LIVE GPS badge */}
-        <div style={{ position: 'absolute', top: '12px', left: '12px', zIndex: 999, background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', borderRadius: '20px', padding: '5px 12px', display: 'flex', alignItems: 'center', gap: '6px', border: `1px solid ${myLocation ? 'rgba(34,197,94,0.4)' : 'rgba(245,158,11,0.4)'}`, boxShadow: '0 2px 8px rgba(0,0,0,0.12)' }}>
-          <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: myLocation ? '#22c55e' : '#f59e0b', animation: 'tt-dot 1.6s ease infinite' }} />
-          <span style={{ fontSize: '11px', color: '#111', fontWeight: 700, letterSpacing: '.06em' }}>{myLocation ? 'LIVE GPS' : 'LOCATING…'}</span>
-        </div>
-
-        {/* Map style picker */}
-        <div style={{ position: 'absolute', top: '12px', right: '12px', zIndex: 999 }}>
-          <button onClick={() => setShowPicker(!showPicker)} style={{ background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', border: '1px solid rgba(0,0,0,0.15)', borderRadius: '10px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, fontFamily: 'Space Grotesk, sans-serif', boxShadow: '0 2px 8px rgba(0,0,0,0.12)' }}>
-            {MAP_STYLES[mapStyle].label} ▾
+      {/* ══ TAB BAR ══ */}
+      <div style={{ display: 'flex', gap: '6px', padding: '12px 16px 0', background: 'var(--bg2)', borderBottom: '1px solid var(--border)' }}>
+        {(['map','deliveries','drivers','stats'] as const).map(t => (
+          <button key={t} style={tabStyle(t)} onClick={() => setActiveTab(t)}>
+            {t === 'map' ? '🗺️ Map' : t === 'deliveries' ? '📦 Orders' : t === 'drivers' ? '🏍️ Drivers' : '📊 Stats'}
           </button>
-          {showPicker && (
-            <div style={{ position: 'absolute', top: '38px', right: 0, background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(12px)', border: '1px solid rgba(0,0,0,0.12)', borderRadius: '12px', padding: '6px', minWidth: '145px', boxShadow: '0 8px 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column', gap: '3px', zIndex: 9999 }}>
-              {MAP_STYLES.map((s, i) => (
-                <button key={s.label} onClick={() => { setMapStyle(i); setShowPicker(false); }} style={{ background: mapStyle === i ? '#f5c518' : 'transparent', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: mapStyle === i ? '#0a0a0a' : '#333', textAlign: 'left', width: '100%' }}>
-                  {s.label} {mapStyle === i && '✓'}
-                </button>
-              ))}
+        ))}
+      </div>
+
+      {/* ══════════ MAP TAB ══════════ */}
+      {activeTab === 'map' && (
+        <div>
+          <div style={{ position: 'relative', height: '360px', width: '100%' }}>
+            <MapContainer center={mapCenter} zoom={myLocation ? 14 : 13} style={{ height: '100%', width: '100%' }} zoomControl={false} scrollWheelZoom={true} attributionControl={false}>
+              <TileLayer url={MAP_STYLES[mapStyle].url} maxZoom={19} />
+              {myLocation && !activeOrder && <MapFollower pos={myLocation} />}
+              {allMapPositions.length >= 2 && <MapBounds positions={allMapPositions} />}
+              {routeM2S?.points && activeOrder?.status !== 'in_transit' && <Polyline positions={routeM2S.points} color="#f5c518" weight={5} opacity={0.9} dashArray="10 6" />}
+              {routeM2R?.points && activeOrder?.status === 'in_transit' && <Polyline positions={routeM2R.points} color="#3b82f6" weight={5} opacity={0.9} />}
+              {routeS2R?.points && <Polyline positions={routeS2R.points} color="#22c55e" weight={3} opacity={0.5} dashArray="6 6" />}
+              {myLocation && <Marker position={myLocation} icon={meIcon}><Popup><div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '150px' }}><p style={{ fontWeight: 800, fontSize: '13px', marginBottom: '4px' }}>{isMotari ? '🏍️ You (Motari)' : '📍 You are here'}</p><p style={{ fontSize: '12px', color: '#555' }}>{locationName}</p>{accuracy && <p style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>GPS ±{accuracy}m</p>}</div></Popup></Marker>}
+              {!isMotari && activeOrder?.driverPos && <Marker position={activeOrder.driverPos} icon={driverIcon}><Popup><div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '170px' }}><p style={{ fontWeight: 800, fontSize: '14px', marginBottom: '6px' }}>🏍️ Your Motari</p><p style={{ fontSize: '13px', fontWeight: 700 }}>{activeOrder.driver_name || 'Driver'}</p>{activeOrder.driver_phone && <p style={{ fontSize: '12px', color: '#555', marginTop: '3px' }}>📞 <a href={`tel:${activeOrder.driver_phone}`} style={{ color: '#2563eb' }}>{activeOrder.driver_phone}</a></p>}</div></Popup></Marker>}
+              {activeOrder?.senderPos && <Marker position={activeOrder.senderPos} icon={senderIcon}><Popup><div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '160px' }}><p style={{ fontWeight: 800, fontSize: '14px', marginBottom: '6px' }}>📤 Sender</p><p style={{ fontSize: '13px', fontWeight: 700 }}>{activeOrder.sender_name}</p><p style={{ fontSize: '12px', color: '#555' }}>📍 {activeOrder.sender_location}</p></div></Popup></Marker>}
+              {activeOrder?.receiverPos && <Marker position={activeOrder.receiverPos} icon={receiverIcon}><Popup><div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '160px' }}><p style={{ fontWeight: 800, fontSize: '14px', marginBottom: '6px' }}>📥 Receiver</p><p style={{ fontSize: '13px', fontWeight: 700 }}>{activeOrder.receiver_name}</p><p style={{ fontSize: '12px', color: '#555' }}>📍 {activeOrder.receiver_location}</p></div></Popup></Marker>}
+            </MapContainer>
+
+            {/* GPS badge */}
+            <div style={{ position: 'absolute', top: '12px', left: '12px', zIndex: 999, background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', borderRadius: '20px', padding: '5px 12px', display: 'flex', alignItems: 'center', gap: '6px', border: `1px solid ${myLocation ? 'rgba(34,197,94,0.4)' : 'rgba(245,158,11,0.4)'}`, boxShadow: '0 2px 8px rgba(0,0,0,0.12)' }}>
+              <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: myLocation ? '#22c55e' : '#f59e0b', animation: 'tt-dot 1.6s ease infinite' }} />
+              <span style={{ fontSize: '11px', color: '#111', fontWeight: 700, letterSpacing: '.06em' }}>{myLocation ? 'LIVE GPS' : 'LOCATING…'}</span>
+            </div>
+
+            {/* Map style picker */}
+            <div style={{ position: 'absolute', top: '12px', right: '12px', zIndex: 999 }}>
+              <button onClick={() => setShowPicker(!showPicker)} style={{ background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', border: '1px solid rgba(0,0,0,0.15)', borderRadius: '10px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, fontFamily: 'Space Grotesk, sans-serif', boxShadow: '0 2px 8px rgba(0,0,0,0.12)' }}>
+                {MAP_STYLES[mapStyle].label} ▾
+              </button>
+              {showPicker && (
+                <div style={{ position: 'absolute', top: '38px', right: 0, background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(12px)', border: '1px solid rgba(0,0,0,0.12)', borderRadius: '12px', padding: '6px', minWidth: '145px', boxShadow: '0 8px 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column', gap: '3px', zIndex: 9999 }}>
+                  {MAP_STYLES.map((s, i) => (
+                    <button key={s.label} onClick={() => { setMapStyle(i); setShowPicker(false); }} style={{ background: mapStyle === i ? '#f5c518' : 'transparent', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: mapStyle === i ? '#0a0a0a' : '#333', textAlign: 'left', width: '100%' }}>
+                      {s.label} {mapStyle === i && '✓'}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Location name */}
+            <div style={{ position: 'absolute', bottom: '12px', left: '50%', transform: 'translateX(-50%)', zIndex: 999, background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', borderRadius: '20px', padding: '6px 16px', display: 'flex', alignItems: 'center', gap: '6px', border: '1px solid rgba(0,0,0,0.1)', boxShadow: '0 2px 8px rgba(0,0,0,0.12)', whiteSpace: 'nowrap', maxWidth: '85%' }}>
+              <MapPin size={11} color="#f5c518" />
+              <span style={{ fontSize: '12px', color: '#111', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>{locationName}</span>
+              {accuracy && <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '10px', fontWeight: 600, background: accuracy < 30 ? 'rgba(34,197,94,0.1)' : 'rgba(245,197,24,0.1)', color: accuracy < 30 ? '#16a34a' : '#ca8a04' }}>±{accuracy}m</span>}
+            </div>
+
+            {/* ETA bars */}
+            {isMotari && activeOrder && (routeM2S || routeM2R || routeS2R) && (
+              <div style={{ position: 'absolute', bottom: '50px', left: '12px', right: '12px', zIndex: 998, background: 'rgba(0,0,0,0.75)', borderRadius: '10px', padding: '8px 14px', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                {routeM2S && activeOrder.status !== 'in_transit' && <span style={{ color: '#f5c518', fontWeight: 700, fontSize: '12px' }}>🏍️→📤 {routeM2S.distanceKm}km · ~{routeM2S.durationMin}min to pickup</span>}
+                {routeM2R && activeOrder.status === 'in_transit' && <span style={{ color: '#60a5fa', fontWeight: 700, fontSize: '12px' }}>🏍️→📥 {routeM2R.distanceKm}km · ~{routeM2R.durationMin}min to dropoff</span>}
+                {routeS2R && <span style={{ color: '#4ade80', fontWeight: 700, fontSize: '12px' }}>📤→📥 {routeS2R.distanceKm}km total</span>}
+              </div>
+            )}
+            {!isMotari && activeOrder?.driverPos && (routeM2S || routeM2R) && (
+              <div style={{ position: 'absolute', bottom: '50px', left: '12px', right: '12px', zIndex: 998, background: 'rgba(0,0,0,0.75)', borderRadius: '10px', padding: '8px 14px', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                {routeM2S && activeOrder.status !== 'in_transit' && <span style={{ color: '#f59e0b', fontWeight: 700, fontSize: '12px' }}>🏍️ → you in ~{routeM2S.durationMin}min ({routeM2S.distanceKm}km)</span>}
+                {routeM2R && activeOrder.status === 'in_transit' && <span style={{ color: '#60a5fa', fontWeight: 700, fontSize: '12px' }}>ETA ~{routeM2R.durationMin}min · {routeM2R.distanceKm}km away</span>}
+              </div>
+            )}
+          </div>
+
+          {/* Active order card */}
+          {!isMotari && hasActiveOrder && (
+            <div style={{ margin: '14px 16px 0', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <AlertCircle size={18} color="var(--red)" style={{ flexShrink: 0 }} />
+              <div>
+                <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--red)' }}>You have an active order in progress</p>
+                <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>You cannot place a new order until your current delivery is completed.</p>
+              </div>
+            </div>
+          )}
+
+          {activeOrder && (
+            <div style={{ margin: '14px 16px 0', background: 'var(--bg2)', border: `2px solid ${STATUS_COLOR(activeOrder.status)}44`, borderRadius: '16px', overflow: 'hidden' }}>
+              <div style={{ background: `${STATUS_COLOR(activeOrder.status)}14`, padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${STATUS_COLOR(activeOrder.status)}22` }}>
+                <div>
+                  <p style={{ fontWeight: 800, fontSize: '15px', color: STATUS_COLOR(activeOrder.status) }}>{STATUS_LABEL(activeOrder.status)}</p>
+                  <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px', fontFamily: 'monospace' }}>#{activeOrder.id.slice(0, 8)}</p>
+                </div>
+                <p style={{ fontWeight: 800, fontSize: '18px', color: 'var(--yellow)' }}>{(activeOrder.predicted_price || 0).toLocaleString()} RWF</p>
+              </div>
+              <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <div style={{ background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: '10px', padding: '10px' }}>
+                    <p style={{ fontSize: '10px', color: '#f59e0b', fontWeight: 700, textTransform: 'uppercase', marginBottom: '4px' }}>📤 Sender</p>
+                    <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>{activeOrder.sender_name}</p>
+                    <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>📞 {activeOrder.sender_number}</p>
+                    <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '1px' }}>📍 {activeOrder.sender_location}</p>
+                    {activeOrder.sender_number && <a href={`tel:${activeOrder.sender_number}`} style={{ display: 'inline-block', marginTop: '6px', background: 'rgba(245,158,11,0.15)', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', fontWeight: 700, color: '#f59e0b', textDecoration: 'none' }}>📞 Call</a>}
+                  </div>
+                  <div style={{ background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', padding: '10px' }}>
+                    <p style={{ fontSize: '10px', color: '#22c55e', fontWeight: 700, textTransform: 'uppercase', marginBottom: '4px' }}>📥 Receiver</p>
+                    <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>{activeOrder.receiver_name}</p>
+                    <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>📞 {activeOrder.receiver_number}</p>
+                    <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '1px' }}>📍 {activeOrder.receiver_location}</p>
+                    {activeOrder.receiver_number && <a href={`tel:${activeOrder.receiver_number}`} style={{ display: 'inline-block', marginTop: '6px', background: 'rgba(34,197,94,0.15)', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', fontWeight: 700, color: '#22c55e', textDecoration: 'none' }}>📞 Call</a>}
+                  </div>
+                </div>
+
+                {/* Timeline */}
+                <div style={{ background: 'var(--bg3)', borderRadius: '10px', padding: '12px' }}>
+                  <p style={{ fontSize: '11px', color: 'var(--text3)', fontWeight: 700, marginBottom: '10px', textTransform: 'uppercase' }}>Delivery Timeline</p>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {getTimeline(activeOrder).map((step, i) => (
+                      <div key={step.key} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: step.done ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', flexShrink: 0, border: `1px solid ${step.done ? 'rgba(34,197,94,0.3)' : 'rgba(128,128,128,0.2)'}` }}>
+                          {step.icon}
+                        </div>
+                        <span style={{ fontSize: '13px', fontWeight: step.done ? 700 : 400, color: step.done ? 'var(--text)' : 'var(--text3)' }}>{step.label}</span>
+                        {step.done && <CheckCircle size={12} color="#22c55e" style={{ marginLeft: 'auto' }} />}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {!isMotari && activeOrder.driver_name && (
+                  <div style={{ background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: '10px', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <span style={{ fontSize: '26px' }}>🏍️</span>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontSize: '10px', color: '#3b82f6', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Your Motari</p>
+                      <p style={{ fontSize: '14px', fontWeight: 800, color: 'var(--text)' }}>{activeOrder.driver_name}</p>
+                      <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>{activeOrder.driver_phone}{activeOrder.driver_plate && ` · 🪪 ${activeOrder.driver_plate}`}</p>
+                    </div>
+                    {activeOrder.driver_phone && <a href={`tel:${activeOrder.driver_phone}`} style={{ background: 'rgba(59,130,246,0.15)', borderRadius: '10px', padding: '10px', textDecoration: 'none', fontSize: '18px', flexShrink: 0 }}>📞</a>}
+                  </div>
+                )}
+
+                {activeOrder.status === 'in_transit' && (
+                  <div style={{ background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.25)', borderRadius: '10px', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div className="spinner" style={{ width: '14px', height: '14px', borderWidth: '2px', flexShrink: 0 }} />
+                    <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--blue)' }}>🚀 Package on the way — motari tracked live on map above</p>
+                  </div>
+                )}
+                {activeOrder.status === 'delivered' && (
+                  <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '10px', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <CheckCircle size={16} color="var(--green)" />
+                    <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--green)' }}>Delivered successfully! 🎉</p>
+                  </div>
+                )}
+
+                {!activeOrder.sender_paid && activeOrder.sender_id === profile?.id && ['accepted','awaiting_payment'].includes(activeOrder.status) && (
+                  <div>
+                    {payStatus[activeOrder.id] === 'pending' || payStatus[activeOrder.id] === 'requesting' ? (
+                      <div style={{ padding: '13px', background: 'var(--bg3)', borderRadius: '10px', textAlign: 'center' }}>
+                        <div className="spinner" style={{ width: '16px', height: '16px', margin: '0 auto 6px' }} />
+                        <p style={{ fontSize: '13px', fontWeight: 700 }}>{payStatus[activeOrder.id] === 'requesting' ? '⏳ Connecting to MoMo…' : '📱 Check your phone!'}</p>
+                      </div>
+                    ) : (
+                      <button onClick={() => handlePay(activeOrder.id)} disabled={payingId === activeOrder.id} style={{ width: '100%', padding: '14px', background: 'var(--yellow)', border: 'none', borderRadius: '10px', fontWeight: 800, fontSize: '15px', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', color: '#0a0a0a' }}>
+                        📱 Pay {(activeOrder.predicted_price || 0).toLocaleString()} RWF with MoMo
+                      </button>
+                    )}
+                    {payStatus[activeOrder.id] === 'failed'  && <p style={{ fontSize: '11px', color: 'var(--red)', textAlign: 'center', marginTop: '6px' }}>❌ Payment failed. Try again.</p>}
+                    {payStatus[activeOrder.id] === 'timeout' && <p style={{ fontSize: '11px', color: 'var(--red)', textAlign: 'center', marginTop: '6px' }}>⏰ Timed out. Try again.</p>}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
-
-        {/* Location name */}
-        <div style={{ position: 'absolute', bottom: '12px', left: '50%', transform: 'translateX(-50%)', zIndex: 999, background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', borderRadius: '20px', padding: '6px 16px', display: 'flex', alignItems: 'center', gap: '6px', border: '1px solid rgba(0,0,0,0.1)', boxShadow: '0 2px 8px rgba(0,0,0,0.12)', whiteSpace: 'nowrap', maxWidth: '85%' }}>
-          <MapPin size={11} color="#f5c518" />
-          <span style={{ fontSize: '12px', color: '#111', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>{locationName}</span>
-          {accuracy && <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '10px', fontWeight: 600, background: accuracy < 30 ? 'rgba(34,197,94,0.1)' : 'rgba(245,197,24,0.1)', color: accuracy < 30 ? '#16a34a' : '#ca8a04' }}>±{accuracy}m</span>}
-        </div>
-
-        {/* ── ETA bar for motari (routes summary) ── */}
-        {isMotari && activeOrder && (routeM2S || routeM2R || routeS2R) && (
-          <div style={{ position: 'absolute', bottom: '50px', left: '12px', right: '12px', zIndex: 998, background: 'rgba(0,0,0,0.75)', borderRadius: '10px', padding: '8px 14px', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
-            {routeM2S && activeOrder.status !== 'in_transit' && (
-              <span style={{ color: '#f5c518', fontWeight: 700, fontSize: '12px' }}>🏍️→📤 {routeM2S.distanceKm}km · ~{routeM2S.durationMin}min to pickup</span>
-            )}
-            {routeM2R && activeOrder.status === 'in_transit' && (
-              <span style={{ color: '#60a5fa', fontWeight: 700, fontSize: '12px' }}>🏍️→📥 {routeM2R.distanceKm}km · ~{routeM2R.durationMin}min to dropoff</span>
-            )}
-            {routeS2R && (
-              <span style={{ color: '#4ade80', fontWeight: 700, fontSize: '12px' }}>📤→📥 {routeS2R.distanceKm}km total</span>
-            )}
-          </div>
-        )}
-
-        {/* ETA bar for sender/receiver */}
-        {!isMotari && activeOrder?.driverPos && (routeM2S || routeM2R) && (
-          <div style={{ position: 'absolute', bottom: '50px', left: '12px', right: '12px', zIndex: 998, background: 'rgba(0,0,0,0.75)', borderRadius: '10px', padding: '8px 14px', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
-            {routeM2S && activeOrder.status !== 'in_transit' && (
-              <span style={{ color: '#f59e0b', fontWeight: 700, fontSize: '12px' }}>🏍️ → you in ~{routeM2S.durationMin}min ({routeM2S.distanceKm}km)</span>
-            )}
-            {routeM2R && activeOrder.status === 'in_transit' && (
-              <span style={{ color: '#60a5fa', fontWeight: 700, fontSize: '12px' }}>ETA ~{routeM2R.durationMin}min · {routeM2R.distanceKm}km away</span>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* ══════════ BLOCK BANNER ══════════ */}
-      {!isMotari && hasActiveOrder && (
-        <div style={{ margin: '14px 16px 0', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <AlertCircle size={18} color="var(--red)" style={{ flexShrink: 0 }} />
-          <div>
-            <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--red)' }}>You have an active order in progress</p>
-            <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>You cannot place a new order until your current delivery is completed.</p>
-          </div>
-        </div>
       )}
 
-      {/* ══════════ ACTIVE ORDER DETAIL CARD ══════════ */}
-      {activeOrder && (
-        <div style={{ margin: '14px 16px 0', background: 'var(--bg2)', border: `2px solid ${STATUS_COLOR(activeOrder.status)}44`, borderRadius: '16px', overflow: 'hidden' }}>
-          <div style={{ background: `${STATUS_COLOR(activeOrder.status)}14`, padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${STATUS_COLOR(activeOrder.status)}22` }}>
-            <div>
-              <p style={{ fontWeight: 800, fontSize: '15px', color: STATUS_COLOR(activeOrder.status) }}>{STATUS_LABEL(activeOrder.status)}</p>
-              <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px', fontFamily: 'monospace' }}>#{activeOrder.id.slice(0, 8)}</p>
+      {/* ══════════ DELIVERIES TAB ══════════ */}
+      {activeTab === 'deliveries' && (
+        <div style={{ padding: '14px 16px 100px' }}>
+
+          {/* Search + Filter bar */}
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+            <div style={{ flex: 1, position: 'relative' }}>
+              <Search size={13} color="var(--text3)" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+              <input value={searchQ} onChange={e => setSearchQ(e.target.value)} placeholder="Search orders, names, locations…" className="eg-input" style={{ paddingLeft: '30px', fontSize: '13px' }} />
             </div>
-            <p style={{ fontWeight: 800, fontSize: '18px', color: 'var(--yellow)' }}>{(activeOrder.predicted_price || 0).toLocaleString()} RWF</p>
+            <button onClick={() => setShowFilters(!showFilters)} style={{ padding: '0 12px', borderRadius: '10px', border: '1px solid var(--border2)', background: showFilters ? 'var(--yellow)' : 'var(--bg3)', cursor: 'pointer', color: showFilters ? '#0a0a0a' : 'var(--text3)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 700, fontSize: '12px', fontFamily: 'Space Grotesk, sans-serif' }}>
+              <Filter size={13} /> Filters
+            </button>
           </div>
 
-          <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-
-            {/* Sender / Receiver */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-              <div style={{ background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.2)', borderRadius: '10px', padding: '10px' }}>
-                <p style={{ fontSize: '10px', color: '#f59e0b', fontWeight: 700, textTransform: 'uppercase', marginBottom: '4px' }}>📤 Sender</p>
-                <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>{activeOrder.sender_name}</p>
-                <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>📞 {activeOrder.sender_number}</p>
-                <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '1px' }}>📍 {activeOrder.sender_location}</p>
-                {isMotari && routeM2S && activeOrder.status !== 'in_transit' && (
-                  <p style={{ fontSize: '11px', color: '#f5c518', fontWeight: 700, marginTop: '5px' }}>🟡 {routeM2S.distanceKm}km · ~{routeM2S.durationMin}min</p>
-                )}
-              </div>
-              <div style={{ background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', padding: '10px' }}>
-                <p style={{ fontSize: '10px', color: '#22c55e', fontWeight: 700, textTransform: 'uppercase', marginBottom: '4px' }}>📥 Receiver</p>
-                <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>{activeOrder.receiver_name}</p>
-                <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>📞 {activeOrder.receiver_number}</p>
-                <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '1px' }}>📍 {activeOrder.receiver_location}</p>
-                {isMotari && routeS2R && (
-                  <p style={{ fontSize: '11px', color: '#22c55e', fontWeight: 700, marginTop: '5px' }}>🟢 {routeS2R.distanceKm}km total</p>
-                )}
-              </div>
-            </div>
-
-            {/* Driver card — shown to sender/receiver only */}
-            {!isMotari && activeOrder.driver_name && (
-              <div style={{ background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: '10px', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <span style={{ fontSize: '26px' }}>🏍️</span>
-                <div style={{ flex: 1 }}>
-                  <p style={{ fontSize: '10px', color: '#3b82f6', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Your Motari</p>
-                  <p style={{ fontSize: '14px', fontWeight: 800, color: 'var(--text)' }}>{activeOrder.driver_name}</p>
-                  <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>{activeOrder.driver_phone}{activeOrder.driver_plate && ` · 🪪 ${activeOrder.driver_plate}`}</p>
-                </div>
-                {activeOrder.driver_phone && (
-                  <a href={`tel:${activeOrder.driver_phone}`} style={{ background: 'rgba(59,130,246,0.15)', borderRadius: '10px', padding: '10px', textDecoration: 'none', fontSize: '18px', flexShrink: 0 }}>📞</a>
-                )}
-              </div>
-            )}
-
-            {/* In-transit notice */}
-            {activeOrder.status === 'in_transit' && (
-              <div style={{ background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.25)', borderRadius: '10px', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <div className="spinner" style={{ width: '14px', height: '14px', borderWidth: '2px', flexShrink: 0 }} />
-                <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--blue)' }}>🚀 Package on the way — motari tracked live on map above</p>
-              </div>
-            )}
-
-            {activeOrder.status === 'delivered' && (
-              <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '10px', padding: '10px 12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <CheckCircle size={16} color="var(--green)" />
-                <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--green)' }}>Delivered successfully! 🎉</p>
-              </div>
-            )}
-
-            {/* Pay button */}
-            {!activeOrder.sender_paid && activeOrder.sender_id === profile?.id && ['accepted', 'awaiting_payment'].includes(activeOrder.status) && (
+          {showFilters && (
+            <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px', marginBottom: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <div>
-                {payStatus[activeOrder.id] === 'pending' || payStatus[activeOrder.id] === 'requesting' ? (
-                  <div style={{ padding: '13px', background: 'var(--bg3)', borderRadius: '10px', textAlign: 'center' }}>
-                    <div className="spinner" style={{ width: '16px', height: '16px', margin: '0 auto 6px' }} />
-                    <p style={{ fontSize: '13px', fontWeight: 700 }}>{payStatus[activeOrder.id] === 'requesting' ? '⏳ Connecting to MoMo…' : '📱 Check your phone!'}</p>
-                  </div>
-                ) : (
-                  <button onClick={() => handlePay(activeOrder.id)} disabled={payingId === activeOrder.id} style={{ width: '100%', padding: '14px', background: 'var(--yellow)', border: 'none', borderRadius: '10px', fontWeight: 800, fontSize: '15px', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', color: '#0a0a0a' }}>
-                    📱 Pay {(activeOrder.predicted_price || 0).toLocaleString()} RWF with MoMo
-                  </button>
-                )}
-                {payStatus[activeOrder.id] === 'failed'  && <p style={{ fontSize: '11px', color: 'var(--red)', textAlign: 'center', marginTop: '6px' }}>❌ Payment failed. Try again.</p>}
-                {payStatus[activeOrder.id] === 'timeout' && <p style={{ fontSize: '11px', color: 'var(--red)', textAlign: 'center', marginTop: '6px' }}>⏰ Timed out. Try again.</p>}
+                <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text3)', marginBottom: '6px' }}>STATUS</p>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {['all','awaiting_payment','pending','accepted','in_transit','delivered'].map(s => (
+                    <button key={s} onClick={() => setFilterStatus(s)} style={{ padding: '4px 10px', borderRadius: '20px', border: 'none', cursor: 'pointer', fontSize: '11px', fontWeight: 700, background: filterStatus === s ? 'var(--yellow)' : 'var(--bg3)', color: filterStatus === s ? '#0a0a0a' : 'var(--text3)', fontFamily: 'Space Grotesk, sans-serif' }}>
+                      {s === 'all' ? 'All' : STATUS_LABEL(s)}
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
-          </div>
+              {uniqueDrivers.length > 0 && (
+                <div>
+                  <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text3)', marginBottom: '6px' }}>DRIVER</p>
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    {['all', ...uniqueDrivers].map(d => (
+                      <button key={d} onClick={() => setFilterDriver(d)} style={{ padding: '4px 10px', borderRadius: '20px', border: 'none', cursor: 'pointer', fontSize: '11px', fontWeight: 700, background: filterDriver === d ? 'var(--yellow)' : 'var(--bg3)', color: filterDriver === d ? '#0a0a0a' : 'var(--text3)', fontFamily: 'Space Grotesk, sans-serif' }}>
+                        {d === 'all' ? 'All Drivers' : d}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Delay alerts */}
+          {stats.delayed > 0 && (
+            <div style={{ background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '12px', padding: '10px 14px', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <AlertCircle size={16} color="var(--red)" />
+              <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--red)' }}>⚠️ {stats.delayed} delayed order{stats.delayed > 1 ? 's' : ''} detected!</p>
+            </div>
+          )}
+
+          {filteredOrders.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '48px 20px', color: 'var(--text3)' }}>
+              <Package size={36} style={{ margin: '0 auto 12px', opacity: 0.4 }} />
+              <p style={{ fontWeight: 600, fontSize: '15px' }}>No orders found</p>
+            </div>
+          ) : filteredOrders.map(order => {
+            const sc = STATUS_COLOR(order.status);
+            const isDelayed = (() => { const age = (Date.now() - new Date(order.created_at).getTime()) / 60000; return ['pending','accepted'].includes(order.status) && age > 60; })();
+            const expanded = selectedOrder?.id === order.id;
+            return (
+              <div key={order.id} style={{ background: 'var(--bg2)', border: `1px solid ${isDelayed ? 'rgba(239,68,68,0.4)' : 'var(--border)'}`, borderRadius: '12px', marginBottom: '10px', overflow: 'hidden' }}>
+                <div onClick={() => setSelectedOrder(expanded ? null : order)} style={{ padding: '12px 14px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                      <span style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--text3)' }}>#{order.id.slice(0, 8)}</span>
+                      <span style={{ fontSize: '11px', fontWeight: 700, padding: '2px 8px', borderRadius: '20px', background: `${sc}18`, color: sc, border: `1px solid ${sc}44` }}>{STATUS_LABEL(order.status)}</span>
+                      {isDelayed && <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--red)', background: 'rgba(239,68,68,0.1)', padding: '2px 6px', borderRadius: '10px' }}>⚠️ DELAYED</span>}
+                    </div>
+                    <p style={{ fontSize: '12px', color: 'var(--text3)' }}>📤 {order.sender_name} → 📥 {order.receiver_name}</p>
+                    <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}><MapPin size={10} style={{ display: 'inline' }} /> {order.sender_location} → {order.receiver_location}</p>
+                    {order.driver_name && <p style={{ fontSize: '11px', color: '#3b82f6', marginTop: '2px' }}>🏍️ {order.driver_name}</p>}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', marginLeft: '10px' }}>
+                    <p style={{ fontWeight: 800, fontSize: '14px', color: 'var(--yellow)' }}>{(order.predicted_price || 0).toLocaleString()} RWF</p>
+                    {expanded ? <ChevronUp size={14} color="var(--text3)" /> : <ChevronDown size={14} color="var(--text3)" />}
+                  </div>
+                </div>
+
+                {expanded && (
+                  <div style={{ padding: '0 14px 14px', borderTop: '1px solid var(--border)', paddingTop: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {/* Timeline */}
+                    <div style={{ background: 'var(--bg3)', borderRadius: '10px', padding: '10px' }}>
+                      <p style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text3)', marginBottom: '8px', textTransform: 'uppercase' }}>Timeline</p>
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        {getTimeline(order).map((step, i) => (
+                          <div key={step.key} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: step.done ? 'rgba(34,197,94,0.2)' : 'rgba(128,128,128,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', border: `1px solid ${step.done ? 'rgba(34,197,94,0.4)' : 'rgba(128,128,128,0.2)'}` }} title={step.label}>
+                              {step.icon}
+                            </div>
+                            {i < 4 && <div style={{ width: '14px', height: '2px', background: step.done ? '#22c55e' : 'var(--border)', borderRadius: '2px' }} />}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Contact buttons */}
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      {order.sender_number && (
+                        <a href={`tel:${order.sender_number}`} style={{ flex: 1, padding: '8px', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '8px', textAlign: 'center', fontSize: '12px', fontWeight: 700, color: '#f59e0b', textDecoration: 'none' }}>
+                          📞 Call Sender
+                        </a>
+                      )}
+                      {order.receiver_number && (
+                        <a href={`tel:${order.receiver_number}`} style={{ flex: 1, padding: '8px', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '8px', textAlign: 'center', fontSize: '12px', fontWeight: 700, color: '#22c55e', textDecoration: 'none' }}>
+                          📞 Call Receiver
+                        </a>
+                      )}
+                    </div>
+
+                    <p style={{ fontSize: '10px', color: 'var(--text3)', textAlign: 'center' }}>
+                      <Clock size={10} style={{ display: 'inline' }} /> {new Date(order.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* ══════════ ALL ORDERS LIST ══════════ */}
-      <div style={{ padding: '14px 16px 100px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', marginTop: '6px' }}>
-          <h2 style={{ fontWeight: 800, fontSize: '17px', color: 'var(--text)' }}>{isMotari ? 'My Jobs' : 'All Orders'}</h2>
-          {myLocation && <span style={{ fontSize: '11px', color: 'var(--green)', display: 'flex', alignItems: 'center', gap: '4px' }}><CheckCircle size={10} /> GPS active</span>}
-        </div>
-
-        {loading ? (
-          <div style={{ textAlign: 'center', padding: '48px' }}><div className="spinner" /></div>
-        ) : orders.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '48px 20px', color: 'var(--text3)' }}>
-            <Package size={36} style={{ margin: '0 auto 12px', opacity: 0.4 }} />
-            <p style={{ fontWeight: 600, fontSize: '15px' }}>{isMotari ? 'No jobs yet' : 'No orders yet'}</p>
-            <p style={{ fontSize: '13px', marginTop: '4px' }}>{isMotari ? 'Accept an order to see it here' : 'Place an order to track it here'}</p>
-          </div>
-        ) : orders.map(order => {
-          const sc = STATUS_COLOR(order.status);
-          return (
-            <div key={order.id} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: '12px', marginBottom: '10px', overflow: 'hidden' }}>
-              <div style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--text3)' }}>#{order.id.slice(0, 8)}</span>
-                <span style={{ fontSize: '11px', fontWeight: 700, padding: '3px 10px', borderRadius: '20px', background: `${sc}18`, color: sc, border: `1px solid ${sc}44` }}>
-                  {STATUS_LABEL(order.status)}
-                </span>
-              </div>
-              <div style={{ padding: '0 14px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <p style={{ fontSize: '12px', color: 'var(--text3)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    <MapPin size={10} /> {order.sender_location} → {order.receiver_location}
-                  </p>
-                  <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '3px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    <Clock size={10} /> {new Date(order.created_at).toLocaleString()}
-                  </p>
-                </div>
-                <p style={{ fontWeight: 800, fontSize: '14px', color: 'var(--yellow)' }}>{(order.predicted_price || 0).toLocaleString()} RWF</p>
-              </div>
+      {/* ══════════ DRIVERS TAB ══════════ */}
+      {activeTab === 'drivers' && (
+        <div style={{ padding: '14px 16px 100px' }}>
+          <h2 style={{ fontWeight: 800, fontSize: '17px', color: 'var(--text)', marginBottom: '14px' }}>🏍️ Driver Status</h2>
+          {drivers.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '48px', color: 'var(--text3)' }}>
+              <Truck size={36} style={{ margin: '0 auto 12px', opacity: 0.4 }} />
+              <p style={{ fontWeight: 600 }}>No drivers registered</p>
             </div>
-          );
-        })}
-      </div>
+          ) : drivers.map(driver => {
+            const driverOrders = orders.filter(o => o.driver_name === driver.profiles?.full_name);
+            const activeCount  = driverOrders.filter(o => ['accepted','in_transit'].includes(o.status)).length;
+            const isOnline     = driver.latitude && driver.longitude;
+            return (
+              <div key={driver.id} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: '12px', padding: '14px', marginBottom: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{ width: '44px', height: '44px', borderRadius: '50%', background: 'rgba(245,197,24,0.15)', border: '2px solid rgba(245,197,24,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '22px', flexShrink: 0 }}>🏍️</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>
+                      <p style={{ fontWeight: 800, fontSize: '14px', color: 'var(--text)' }}>{driver.profiles?.full_name || 'Unknown Driver'}</p>
+                      <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '10px', background: isOnline ? 'rgba(34,197,94,0.15)' : 'rgba(128,128,128,0.1)', color: isOnline ? '#22c55e' : 'var(--text3)' }}>
+                        {isOnline ? '🟢 Online' : '⚫ Offline'}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: '12px', color: 'var(--text3)' }}>📞 {driver.profiles?.phone_number || '—'}</p>
+                    {driver.plate_number && <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '1px' }}>🪪 {driver.plate_number}</p>}
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <p style={{ fontSize: '20px', fontWeight: 800, color: activeCount > 0 ? 'var(--yellow)' : 'var(--text3)' }}>{activeCount}</p>
+                    <p style={{ fontSize: '10px', color: 'var(--text3)' }}>active</p>
+                  </div>
+                </div>
+                {driver.profiles?.phone_number && (
+                  <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                    <a href={`tel:${driver.profiles.phone_number}`} style={{ flex: 1, padding: '8px', background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.3)', borderRadius: '8px', textAlign: 'center', fontSize: '12px', fontWeight: 700, color: '#3b82f6', textDecoration: 'none' }}>
+                      📞 Call
+                    </a>
+                    <a href={`sms:${driver.profiles.phone_number}`} style={{ flex: 1, padding: '8px', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '8px', textAlign: 'center', fontSize: '12px', fontWeight: 700, color: '#22c55e', textDecoration: 'none' }}>
+                      💬 Message
+                    </a>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ══════════ STATS TAB ══════════ */}
+      {activeTab === 'stats' && (
+        <div style={{ padding: '14px 16px 100px' }}>
+          <h2 style={{ fontWeight: 800, fontSize: '17px', color: 'var(--text)', marginBottom: '14px' }}>📊 Performance</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' }}>
+            {[
+              { label: 'Active Deliveries', value: stats.active,    icon: '🚀', color: '#3b82f6' },
+              { label: 'Delivered Today',   value: stats.delivered, icon: '✅', color: '#22c55e' },
+              { label: 'Delayed Orders',    value: stats.delayed,   icon: '⚠️', color: stats.delayed > 0 ? '#ef4444' : '#22c55e' },
+              { label: 'Avg Delivery Time', value: stats.avgTime > 0 ? `${stats.avgTime}m` : '—', icon: '⏱️', color: '#f59e0b' },
+            ].map(s => (
+              <div key={s.label} style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: '14px', padding: '16px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <span style={{ fontSize: '22px' }}>{s.icon}</span>
+                <p style={{ fontSize: '26px', fontWeight: 900, color: s.color }}>{s.value}</p>
+                <p style={{ fontSize: '11px', color: 'var(--text3)', fontWeight: 600 }}>{s.label}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Status breakdown */}
+          <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: '14px', padding: '16px' }}>
+            <p style={{ fontWeight: 800, fontSize: '14px', marginBottom: '12px' }}>Orders by Status</p>
+            {['awaiting_payment','pending','accepted','in_transit','delivered'].map(s => {
+              const count = orders.filter(o => o.status === s).length;
+              const pct   = orders.length ? Math.round(count / orders.length * 100) : 0;
+              return (
+                <div key={s} style={{ marginBottom: '10px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                    <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text)' }}>{STATUS_LABEL(s)}</span>
+                    <span style={{ fontSize: '12px', fontWeight: 700, color: STATUS_COLOR(s) }}>{count}</span>
+                  </div>
+                  <div style={{ height: '6px', background: 'var(--bg3)', borderRadius: '4px', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${pct}%`, background: STATUS_COLOR(s), borderRadius: '4px', transition: 'width .5s' }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
