@@ -5,6 +5,7 @@ import { TrackTab }       from './tabs/TrackTab';
 import { ProfileTab }     from './tabs/ProfileTab';
 import { DriverTab }      from './tabs/DriverTab';
 import { ReceiverTab }    from './tabs/ReceiverTab';
+import { OrderTab }       from './tabs/OrderTab';
 import { useAuth }        from '../contexts/AuthContext';
 
 type TabType = 'home' | 'order' | 'track' | 'profile';
@@ -14,7 +15,6 @@ interface DashboardProps {
   onExitDemo?: () => void;
 }
 
-// Fake demo profile so all tabs render properly
 const DEMO_PROFILE = {
   id:            'demo',
   full_name:     'Demo User',
@@ -30,16 +30,16 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
   const { profile: realProfile } = useAuth();
   const profile = demo ? DEMO_PROFILE : realProfile;
 
-  const [activeTab, setActiveTab] = useState<TabType>('home');
-  // Demo: which tabs need login to access
+  const [activeTab, setActiveTab] = useState<TabType>('order');
   const LOCKED_TABS_DEMO: TabType[] = ['order', 'profile'];
   const [showDemoLock, setShowDemoLock] = useState(false);
 
   const isDriver   = profile?.user_category === 'motari'   || profile?.role === 'driver';
   const isReceiver = profile?.user_category === 'receiver' || profile?.role === 'receiver';
 
+  // Receiver: Order / My Parcels / Profile  (no Home tab)
   const tabs = isReceiver ? [
-    { id: 'home'    as TabType, label: 'Home',       emoji: '🏠' },
+    { id: 'order'   as TabType, label: 'Order',      emoji: '🛒' },
     { id: 'track'   as TabType, label: 'My Parcels', emoji: '📥' },
     { id: 'profile' as TabType, label: 'Profile',    emoji: '👤' },
   ] : isDriver ? [
@@ -64,17 +64,17 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
   }
 
   function renderTab() {
-    if (activeTab === 'home')    return <HomeTab />;
     if (activeTab === 'profile') return <ProfileTab />;
     if (activeTab === 'track') {
       if (isReceiver) return <ReceiverTab />;
       return <TrackTab />;
     }
     if (activeTab === 'order') {
+      if (isReceiver) return <OrderTab />;
       if (isDriver)   return <DriverTab />;
-      if (isReceiver) return null;
       return <SenderOrderTab />;
     }
+    if (activeTab === 'home') return <HomeTab />;
     return null;
   }
 

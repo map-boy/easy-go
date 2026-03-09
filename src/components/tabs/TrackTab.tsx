@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap, ZoomControl } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { MapPin, Package, CheckCircle, Clock, AlertCircle, Phone, Search, Filter, User, Truck, BarChart2, X, ChevronDown, ChevronUp } from 'lucide-react';
@@ -439,6 +439,41 @@ export function TrackTab() {
       <style>{`
         @keyframes tt-ripple { 0%{transform:scale(1);opacity:.6;} 100%{transform:scale(2.8);opacity:0;} }
         @keyframes tt-dot { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.4;transform:scale(.65);} }
+        .leaflet-control-zoom {
+          border: none !important;
+          border-radius: 12px !important;
+          overflow: hidden;
+          box-shadow: 0 4px 16px rgba(0,0,0,0.25) !important;
+          margin-bottom: 56px !important;
+          margin-right: 12px !important;
+        }
+        .leaflet-control-zoom-in,
+        .leaflet-control-zoom-out {
+          width: 36px !important;
+          height: 36px !important;
+          line-height: 36px !important;
+          font-size: 18px !important;
+          font-weight: 700 !important;
+          background: rgba(255,255,255,0.95) !important;
+          color: #111 !important;
+          border: none !important;
+          border-bottom: 1px solid rgba(0,0,0,0.08) !important;
+          display: flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+        }
+        .leaflet-control-zoom-in:hover,
+        .leaflet-control-zoom-out:hover {
+          background: #f5c518 !important;
+          color: #0a0a0a !important;
+        }
+        .leaflet-touch .leaflet-control-zoom-in,
+        .leaflet-touch .leaflet-control-zoom-out {
+          width: 40px !important;
+          height: 40px !important;
+          line-height: 40px !important;
+          font-size: 20px !important;
+        }
       `}</style>
 
       {/* ══ TAB BAR ══ */}
@@ -453,9 +488,10 @@ export function TrackTab() {
       {/* ══════════ MAP TAB ══════════ */}
       {activeTab === 'map' && (
         <div>
-          <div style={{ position: 'relative', height: '360px', width: '100%' }}>
-            <MapContainer center={mapCenter} zoom={myLocation ? 14 : 13} style={{ height: '100%', width: '100%' }} zoomControl={false} scrollWheelZoom={true} attributionControl={false}>
+          <div style={{ position: 'relative', height: '400px', width: '100%' }}>
+            <MapContainer center={mapCenter} zoom={myLocation ? 14 : 13} style={{ height: '100%', width: '100%' }} zoomControl={false} scrollWheelZoom={true} doubleClickZoom={true} touchZoom={true} attributionControl={false}>
               <TileLayer url={MAP_STYLES[mapStyle].url} maxZoom={19} />
+              <ZoomControl position="bottomright" />
               {myLocation && !activeOrder && <MapFollower pos={myLocation} />}
               {allMapPositions.length >= 2 && <MapBounds positions={allMapPositions} />}
               {routeM2S?.points && activeOrder?.status !== 'in_transit' && <Polyline positions={routeM2S.points} color="#f5c518" weight={5} opacity={0.9} dashArray="10 6" />}

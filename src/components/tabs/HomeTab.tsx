@@ -5,6 +5,7 @@ import 'leaflet/dist/leaflet.css';
 import { MapPin, Package, Clock } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
+import { OrderTab } from './OrderTab';
 
 // Fix Leaflet icon bug
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -53,6 +54,26 @@ const MAP_STYLES = [
 export function HomeTab() {
   const { profile } = useAuth();
 
+  const isDriver   = (profile as any)?.user_category === 'motari' || profile?.role === 'driver';
+  const isReceiver = (profile as any)?.user_category === 'receiver' || profile?.role === 'receiver';
+
+  // Receivers go straight to the full Order screen — no switcher needed
+  if (isReceiver) {
+    return <OrderTab />;
+  }
+
+  // Senders & drivers keep the original map view
+  return <SenderDriverView />;
+}
+
+// ─────────────────────────────────────────────────────────────
+// SENDER / DRIVER VIEW  (original HomeTab content, unchanged)
+// ─────────────────────────────────────────────────────────────
+function SenderDriverView() {
+  const { profile } = useAuth();
+
+  const isDriver = (profile as any)?.user_category === 'motari' || profile?.role === 'driver';
+
   const [myLocation, setMyLocation]           = useState<[number, number] | null>(null);
   const [locationName, setLocationName]       = useState('Getting location…');
   const [accuracy, setAccuracy]               = useState<number | null>(null);
@@ -63,9 +84,6 @@ export function HomeTab() {
   const [mapStyle, setMapStyle]               = useState(0);
   const [showStylePicker, setShowStylePicker] = useState(false);
   const watchRef                              = useRef<number | null>(null);
-
-  const isDriver   = (profile as any)?.user_category === 'motari' || profile?.role === 'driver';
-  const isReceiver = (profile as any)?.user_category === 'receiver' || profile?.role === 'receiver';
 
   useEffect(() => {
     startGPS();
@@ -85,15 +103,11 @@ export function HomeTab() {
       setLocationName('GPS not supported');
       return;
     }
-
-    // Fast first fix
     navigator.geolocation.getCurrentPosition(
       (pos) => handlePosition(pos),
       () => setLocationName('Location access denied'),
       { enableHighAccuracy: false, timeout: 5000, maximumAge: 60000 }
     );
-
-    // High accuracy continuous watch
     watchRef.current = navigator.geolocation.watchPosition(
       (pos) => handlePosition(pos),
       () => {},
@@ -103,14 +117,11 @@ export function HomeTab() {
 
   function handlePosition(pos: GeolocationPosition) {
     const { latitude, longitude, accuracy: acc } = pos.coords;
-
     if (isClearlyWrong(latitude, longitude)) {
-      // Silently ignore wrong location — no banner shown
       setGpsWarning(true);
       setAccuracy(Math.round(acc));
       return;
     }
-
     setGpsWarning(false);
     setMyLocation([latitude, longitude]);
     setAccuracy(Math.round(acc));
@@ -119,24 +130,13 @@ export function HomeTab() {
 
   async function reverseGeocode(lat: number, lng: number) {
     try {
-      const res  = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`
-      );
+      const res  = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`);
       const data = await res.json();
       const parts = [
-        data.address?.village       ||
-        data.address?.suburb        ||
-        data.address?.neighbourhood ||
-        data.address?.quarter,
-        data.address?.city  ||
-        data.address?.town  ||
-        data.address?.county,
+        data.address?.village || data.address?.suburb || data.address?.neighbourhood || data.address?.quarter,
+        data.address?.city    || data.address?.town   || data.address?.county,
       ].filter(Boolean);
-      setLocationName(
-        parts.join(', ') ||
-        data.display_name?.split(',').slice(0, 2).join(', ') ||
-        'Rwanda'
-      );
+      setLocationName(parts.join(', ') || data.display_name?.split(',').slice(0, 2).join(', ') || 'Rwanda');
     } catch {
       setLocationName(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
     }
@@ -144,67 +144,31 @@ export function HomeTab() {
 
   async function loadStats() {
     if (!profile) return;
-
     if (isDriver) {
-      const { data: driverRow } = await supabase
-        .from('drivers')
-        .select('id')
-        .eq('user_id', profile.id)
-        .maybeSingle();
-
+      const { data: driverRow } = await supabase.from('drivers').select('id').eq('user_id', profile.id).maybeSingle();
       if (driverRow) {
-        const { data: driverOrders } = await supabase
-          .from('orders')
-          .select('status')
-          .eq('driver_id', driverRow.id);
-
+        const { data: driverOrders } = await supabase.from('orders').select('status').eq('driver_id', driverRow.id);
         const all = driverOrders || [];
-        setStats({
-          total:     all.length,
-          delivered: all.filter(o => o.status === 'delivered').length,
-          active:    all.filter(o => ['accepted', 'paid', 'in_transit'].includes(o.status)).length,
-          pending:   0,
-        });
+        setStats({ total: all.length, delivered: all.filter(o => o.status === 'delivered').length, active: all.filter(o => ['accepted','paid','in_transit'].includes(o.status)).length, pending: 0 });
       }
     } else {
-      const { data } = await supabase
-        .from('orders')
-        .select('status')
-        .or(`sender_id.eq.${profile.id},receiver_id.eq.${profile.id}`);
+      const { data } = await supabase.from('orders').select('status').or(`sender_id.eq.${profile.id},receiver_id.eq.${profile.id}`);
       const all = data || [];
-      setStats({
-        total:     all.length,
-        delivered: all.filter(o => o.status === 'delivered').length,
-        pending:   all.filter(o => o.status === 'pending').length,
-        active:    all.filter(o => ['accepted', 'paid', 'in_transit'].includes(o.status)).length,
-      });
+      setStats({ total: all.length, delivered: all.filter(o => o.status === 'delivered').length, pending: all.filter(o => o.status === 'pending').length, active: all.filter(o => ['accepted','paid','in_transit'].includes(o.status)).length });
     }
   }
 
   async function loadRecentOrders() {
     if (!profile) return;
     setLoading(true);
-
-    let query = supabase
-      .from('orders')
-      .select('id, status, sender_location, receiver_location, predicted_price, created_at')
-      .order('created_at', { ascending: false })
-      .limit(3);
-
+    let query = supabase.from('orders').select('id, status, sender_location, receiver_location, predicted_price, created_at').order('created_at', { ascending: false }).limit(3);
     if (isDriver) {
-      const { data: driverRow } = await supabase
-        .from('drivers').select('id').eq('user_id', profile.id).maybeSingle();
-      if (driverRow) {
-        query = query.eq('driver_id', driverRow.id);
-      } else {
-        setRecentOrders([]);
-        setLoading(false);
-        return;
-      }
+      const { data: driverRow } = await supabase.from('drivers').select('id').eq('user_id', profile.id).maybeSingle();
+      if (driverRow) query = query.eq('driver_id', driverRow.id);
+      else { setRecentOrders([]); setLoading(false); return; }
     } else {
       query = query.or(`sender_id.eq.${profile.id},receiver_id.eq.${profile.id}`);
     }
-
     const { data } = await query;
     setRecentOrders(data || []);
     setLoading(false);
@@ -213,12 +177,8 @@ export function HomeTab() {
   const mapCenter: [number, number] = myLocation || KIGALI;
 
   const sCls: Record<string, string> = {
-    pending:    'badge-yellow',
-    accepted:   'badge-blue',
-    paid:       'badge-green',
-    in_transit: 'badge-blue',
-    delivered:  'badge-green',
-    cancelled:  'badge-red',
+    pending: 'badge-yellow', accepted: 'badge-blue', paid: 'badge-green',
+    in_transit: 'badge-blue', delivered: 'badge-green', cancelled: 'badge-red',
   };
 
   const kpiCards = isDriver ? [
@@ -237,33 +197,21 @@ export function HomeTab() {
     <div style={{ background: 'var(--bg)', minHeight: '100%' }}>
 
       <style>{`
-        @keyframes ripple {
-          0%   { transform: scale(1); opacity: 0.6; }
-          100% { transform: scale(2.8); opacity: 0; }
-        }
-        @keyframes pdot {
-          0%,100% { opacity:1; transform:scale(1); }
-          50%     { opacity:.4; transform:scale(.65); }
-        }
+        @keyframes ripple { 0%{transform:scale(1);opacity:0.6;} 100%{transform:scale(2.8);opacity:0;} }
+        @keyframes pdot   { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.4;transform:scale(.65);} }
       `}</style>
 
+      {/* GPS warning banner */}
+      {gpsWarning && (
+        <div style={{ background: '#7c3aed', color: '#fff', padding: '10px 16px', fontSize: '12px', fontWeight: 600, textAlign: 'center' }}>
+          ⚠️ GPS location outside Rwanda — showing default Kigali view
+        </div>
+      )}
+
       {/* ── LIVE MAP ── */}
-      <div style={{ position: 'relative', height: '300px', width: '100%' }}>
-
-        <MapContainer
-          center={mapCenter}
-          zoom={myLocation ? 16 : 13}
-          style={{ height: '100%', width: '100%' }}
-          zoomControl={false}
-          scrollWheelZoom={true}
-          attributionControl={false}
-        >
-          <TileLayer
-            url={MAP_STYLES[mapStyle].url}
-            attribution={MAP_STYLES[mapStyle].attribution}
-            maxZoom={19}
-          />
-
+      <div style={{ position: 'relative', height: '280px', width: '100%' }}>
+        <MapContainer center={mapCenter} zoom={myLocation ? 16 : 13} style={{ height: '100%', width: '100%' }} zoomControl={false} scrollWheelZoom={true} attributionControl={false}>
+          <TileLayer url={MAP_STYLES[mapStyle].url} attribution={MAP_STYLES[mapStyle].attribution} maxZoom={19} />
           {myLocation && (
             <>
               <MapFollower position={myLocation} />
@@ -272,12 +220,8 @@ export function HomeTab() {
                   <div style={{ fontFamily: 'Space Grotesk, sans-serif', minWidth: '160px' }}>
                     <p style={{ fontWeight: 700, fontSize: '13px', marginBottom: '4px' }}>📍 You are here</p>
                     <p style={{ fontSize: '12px', color: '#555', marginBottom: '4px' }}>{locationName}</p>
-                    {accuracy && (
-                      <p style={{ fontSize: '11px', color: '#888' }}>GPS accuracy: ±{accuracy}m</p>
-                    )}
-                    <p style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
-                      {myLocation[0].toFixed(5)}, {myLocation[1].toFixed(5)}
-                    </p>
+                    {accuracy && <p style={{ fontSize: '11px', color: '#888' }}>GPS accuracy: ±{accuracy}m</p>}
+                    <p style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>{myLocation[0].toFixed(5)}, {myLocation[1].toFixed(5)}</p>
                   </div>
                 </Popup>
               </Marker>
@@ -293,23 +237,14 @@ export function HomeTab() {
 
         {/* Map style switcher */}
         <div style={{ position: 'absolute', top: '12px', right: '12px', zIndex: 999 }}>
-          <button
-            onClick={() => setShowStylePicker(!showStylePicker)}
-            style={{ background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', border: '1px solid rgba(0,0,0,0.15)', borderRadius: '10px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: '#111', fontFamily: 'Space Grotesk, sans-serif', boxShadow: '0 2px 8px rgba(0,0,0,0.12)', display: 'flex', alignItems: 'center', gap: '5px' }}
-          >
+          <button onClick={() => setShowStylePicker(!showStylePicker)} style={{ background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', border: '1px solid rgba(0,0,0,0.15)', borderRadius: '10px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: '#111', fontFamily: 'Space Grotesk, sans-serif', boxShadow: '0 2px 8px rgba(0,0,0,0.12)', display: 'flex', alignItems: 'center', gap: '5px' }}>
             {MAP_STYLES[mapStyle].label} ▾
           </button>
-
           {showStylePicker && (
             <div style={{ position: 'absolute', top: '38px', right: 0, background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(12px)', border: '1px solid rgba(0,0,0,0.12)', borderRadius: '12px', padding: '6px', minWidth: '150px', boxShadow: '0 8px 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column', gap: '3px', zIndex: 9999 }}>
               {MAP_STYLES.map((s, i) => (
-                <button
-                  key={s.label}
-                  onClick={() => { setMapStyle(i); setShowStylePicker(false); }}
-                  style={{ background: mapStyle === i ? '#f5c518' : 'transparent', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: mapStyle === i ? '#0a0a0a' : '#333', fontFamily: 'Space Grotesk, sans-serif', textAlign: 'left', width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
-                >
-                  {s.label}
-                  {mapStyle === i && <span>✓</span>}
+                <button key={s.label} onClick={() => { setMapStyle(i); setShowStylePicker(false); }} style={{ background: mapStyle === i ? '#f5c518' : 'transparent', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: mapStyle === i ? '#0a0a0a' : '#333', fontFamily: 'Space Grotesk, sans-serif', textAlign: 'left', width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  {s.label}{mapStyle === i && <span>✓</span>}
                 </button>
               ))}
             </div>
@@ -319,15 +254,9 @@ export function HomeTab() {
         {/* Location name pill */}
         <div style={{ position: 'absolute', bottom: '12px', left: '50%', transform: 'translateX(-50%)', zIndex: 999, background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(8px)', borderRadius: '20px', padding: '6px 16px', display: 'flex', alignItems: 'center', gap: '6px', border: '1px solid rgba(0,0,0,0.1)', boxShadow: '0 2px 8px rgba(0,0,0,0.12)', whiteSpace: 'nowrap', maxWidth: '85%' }}>
           <MapPin size={11} color="#f5c518" />
-          <span style={{ fontSize: '12px', color: '#111', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {locationName}
-          </span>
+          <span style={{ fontSize: '12px', color: '#111', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>{locationName}</span>
           {accuracy && (
-            <span style={{
-              fontSize: '10px', padding: '2px 6px', borderRadius: '10px', fontWeight: 600,
-              background: accuracy < 30 ? 'rgba(34,197,94,0.1)' : 'rgba(245,197,24,0.1)',
-              color:      accuracy < 30 ? '#16a34a'              : '#ca8a04',
-            }}>
+            <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '10px', fontWeight: 600, background: accuracy < 30 ? 'rgba(34,197,94,0.1)' : 'rgba(245,197,24,0.1)', color: accuracy < 30 ? '#16a34a' : '#ca8a04' }}>
               ±{accuracy}m
             </span>
           )}
@@ -345,7 +274,7 @@ export function HomeTab() {
           </h2>
           <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
             <span style={{ width: '5px', height: '5px', background: 'var(--green)', borderRadius: '50%', display: 'inline-block' }} />
-            {isDriver ? '🏍️ Motari' : isReceiver ? '📥 Receiver' : '📤 Sender'} account
+            {isDriver ? '🏍️ Motari' : '📤 Sender mode'}
           </p>
         </div>
 
@@ -372,9 +301,7 @@ export function HomeTab() {
           </div>
 
           {loading ? (
-            <div style={{ textAlign: 'center', padding: '24px' }}>
-              <div className="spinner" />
-            </div>
+            <div style={{ textAlign: 'center', padding: '24px' }}><div className="spinner" /></div>
           ) : recentOrders.length === 0 ? (
             <div className="card" style={{ textAlign: 'center', padding: '32px' }}>
               <Package size={28} color="var(--text3)" style={{ margin: '0 auto 10px' }} />
@@ -385,9 +312,7 @@ export function HomeTab() {
           ) : recentOrders.map(o => (
             <div key={o.id} className="card" style={{ marginBottom: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <p style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text)', fontFamily: 'monospace', marginBottom: '3px' }}>
-                  #{o.id.slice(0, 8)}
-                </p>
+                <p style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text)', fontFamily: 'monospace', marginBottom: '3px' }}>#{o.id.slice(0, 8)}</p>
                 <p style={{ fontSize: '11px', color: 'var(--text3)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                   <MapPin size={9} /> {o.sender_location} → {o.receiver_location}
                 </p>
