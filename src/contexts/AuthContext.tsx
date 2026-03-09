@@ -19,6 +19,7 @@ interface AuthContextType {
   profile: Profile | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
+  signInWithPhone: (phone: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, metadata: any) => Promise<any>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -27,6 +28,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   user: null, profile: null, loading: true,
   signIn: async () => {},
+  signInWithPhone: async () => {},
   signUp: async () => {},
   signOut: async () => {},
   refreshProfile: async () => {},
@@ -68,6 +70,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) throw error;
   }
 
+  // Phone login — looks up email from profiles table, signs in behind the scenes
+  // FREE — no SMS, no Twilio, no cost at all
+  async function signInWithPhone(phone: string, password: string) {
+    // Step 1: find profile by phone number
+    const { data: prof, error: profErr } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('phone_number', phone)
+      .maybeSingle();
+
+    if (profErr || !prof) {
+      throw new Error('No account found with this phone number. Please sign up first.');
+    }
+
+    // Step 2: get the email linked to this account using our SQL function
+    const { data: email, error: fnErr } = await supabase
+      .rpc('get_email_by_user_id', { uid: prof.id });
+
+    if (fnErr || !email) {
+      throw new Error('Could not retrieve account. Please use email login instead.');
+    }
+
+    // Step 3: sign in with email + password (no SMS needed)
+    const { error: signInErr } = await supabase.auth.signInWithPassword({
+      email: email as string,
+      password,
+    });
+
+    if (signInErr) {
+      throw new Error('Wrong password. Please try again.');
+    }
+  }
+
   async function signUp(email: string, password: string, metadata: any) {
     const { data, error } = await supabase.auth.signUp({
       email,
@@ -76,8 +111,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     if (error) throw error;
 
+    // data.user exists even before email confirmation
+    // We upsert so it works whether confirmed or not
     if (data.user) {
-      const { error: profileError } = await supabase.from('profiles').insert({
+      const { error: profileError } = await supabase.from('profiles').upsert({
         id:            data.user.id,
         full_name:     metadata.full_name     || '',
         phone_number:  metadata.phone_number  || '',
@@ -86,7 +123,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         user_category: metadata.user_category || 'sender',
         role:          metadata.role          || (metadata.user_category === 'motari' ? 'driver' : metadata.user_category),
         is_active:     true,
-      });
+      }, { onConflict: 'id' });
 
       if (profileError) throw profileError;
     }
@@ -106,7 +143,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signIn, signUp, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ user, profile, loading, signIn, signInWithPhone, signUp, signOut, refreshProfile }}>
       {children}
     </AuthContext.Provider>
   );
