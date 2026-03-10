@@ -10,6 +10,7 @@ import {
   CheckCircle, User, Search, X, MapPin, ChevronDown,
 } from 'lucide-react';
 import { supabase } from '../../../lib/supabase';
+import { Star } from 'lucide-react';
 import { useAuth } from '../../../contexts/AuthContext';
 import { predictPrice, isRushHour, haversineKm } from '../../../lib/pricePredictor';
 
@@ -252,6 +253,16 @@ export function SenderOrderView({ onPriceRequest }: {
   const [packageSize,   setPackageSize]   = useState<'small'|'medium'|'large'>('medium');
   const [packageWeight, setPackageWeight] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('MTN MoMo');
+  const [useWallet,     setUseWallet]     = useState(false);
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [walletLoaded,  setWalletLoaded]  = useState(false);
+  // post-delivery review
+  const [reviewOrderId,  setReviewOrderId]  = useState<string|null>(null);
+  const [reviewRating,   setReviewRating]   = useState(0);
+  const [reviewComment,  setReviewComment]  = useState('');
+  const [reviewTip,      setReviewTip]      = useState('');
+  const [reviewLoading,  setReviewLoading]  = useState(false);
+  const [reviewDone,     setReviewDone]     = useState(false);
   const [payerName,     setPayerName]     = useState('');
   const [payerPhone,    setPayerPhone]    = useState({ code: '+250', number: '' });
   const [payerPhoneErr, setPayerPhoneErr] = useState<string | null>(null);
@@ -272,6 +283,26 @@ export function SenderOrderView({ onPriceRequest }: {
   const [deliverySpeed,  setDeliverySpeed]  = useState<'normal'|'rapid'>('normal');
   const [senderPos, setSenderPos] = useState<[number,number]>([-1.9441, 30.0619]);
   const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    async function loadWallet() {
+      if (!profile?.id) return;
+      const { data } = await supabase.from('profiles').select('wallet_balance').eq('id', profile.id).single();
+      setWalletBalance(data?.wallet_balance ?? 0);
+      setWalletLoaded(true);
+    }
+    loadWallet();
+    // check for delivered orders needing review
+    async function checkDelivered() {
+      if (!profile?.id) return;
+      const { data } = await supabase.from('orders')
+        .select('id').eq('sender_id', profile.id)
+        .eq('status', 'delivered').eq('sender_confirmed', true)
+        .is('sender_rating', null).limit(1).maybeSingle();
+      if (data) setReviewOrderId(data.id);
+    }
+    checkDelivered();
+  }, [profile?.id]);
 
   useEffect(() => {
     navigator.geolocation?.getCurrentPosition(
@@ -330,7 +361,7 @@ export function SenderOrderView({ onPriceRequest }: {
       ? (!!manualName && !validatePhone(manualPhone.code, manualPhone.number) && !validateDistrict(manualDistrict) && !!manualLocCoords)
       : false;
 
-  const allFilled = receiverReady && !!packageWeight && !!paymentMethod && !!payerName && !validatePhone(payerPhone.code, payerPhone.number);
+  const allFilled = receiverReady && !!packageWeight;
 
   useEffect(() => {
     if (allFilled) calculatePrice();
@@ -380,6 +411,37 @@ export function SenderOrderView({ onPriceRequest }: {
     } finally { setPriceLoading(false); }
   }
 
+  async function submitReview() {
+    if (!reviewOrderId || reviewRating === 0) return;
+    setReviewLoading(true);
+    const tip = parseInt(reviewTip.replace(/\D/g,'')) || 0;
+    await supabase.from('orders').update({
+      sender_rating: reviewRating,
+      sender_comment: reviewComment,
+      driver_tip: tip,
+      updated_at: new Date().toISOString(),
+    }).eq('id', reviewOrderId);
+    if (tip > 0 && profile?.id) {
+      // add tip to driver wallet - find driver
+      const { data: ord } = await supabase.from('orders').select('driver_id').eq('id', reviewOrderId).single();
+      if (ord?.driver_id) {
+        const { data: drv } = await supabase.from('drivers').select('user_id').eq('id', ord.driver_id).single();
+        if (drv?.user_id) {
+          await supabase.rpc('increment_wallet_balance', { uid: drv.user_id, delta: tip });
+          await supabase.from('wallet_transactions').insert({
+            user_id: drv.user_id, type: 'topup', amount: tip, status: 'completed',
+            description: `Tip from sender — ${reviewComment || 'Great service!'}`,
+          });
+          // Deduct tip from sender wallet
+          await supabase.rpc('increment_wallet_balance', { uid: profile.id, delta: -tip });
+        }
+      }
+    }
+    setReviewLoading(false);
+    setReviewDone(true);
+    setReviewOrderId(null);
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!profile || !priceReady) return;
@@ -394,6 +456,48 @@ export function SenderOrderView({ onPriceRequest }: {
       const receiverId       = receiverHasApp ? selectedReceiver.id           : null;
 
       // ── CHANGED: Insert directly as 'pending' + paid — bypasses payment barrier ──
+      // ── WALLET PAYMENT PATH ──────────────────────────────────────────────────
+      if (useWallet) {
+        if (walletBalance < predictedPrice) {
+          alert('Insufficient wallet balance. Please top up your wallet first.');
+          setLoading(false);
+          return;
+        }
+        // Deduct from wallet immediately
+        await supabase.rpc('increment_wallet_balance', { uid: profile.id, delta: -predictedPrice });
+        await supabase.from('wallet_transactions').insert({
+          user_id: profile.id, type: 'payment', amount: predictedPrice,
+          status: 'completed', description: `Delivery payment — ${receiverName}`,
+        });
+        const { data: newOrder, error: wErr } = await supabase.from('orders').insert({
+          sender_id: profile.id, sender_name: (profile as any).full_name,
+          sender_number: (profile as any).phone_number,
+          sender_location: (profile as any).location, sender_district: (profile as any).district,
+          receiver_id: receiverId, receiver_name: receiverName, receiver_number: receiverNumber,
+          receiver_location: receiverLocation, receiver_district: receiverDistrict,
+          package_size: packageSize, package_weight: packageWeight,
+          predicted_price: predictedPrice, payment_method: 'Wallet',
+          delivery_note: emergencyNote, is_night_delivery: isNight,
+          is_fragile: isFragile, delivery_speed: deliverySpeed,
+          weather_condition: weatherCond, road_condition: roadCond,
+          payer_name: (profile as any).full_name,
+          payer_number: (profile as any).phone_number,
+          status: 'pending', sender_paid: true, payment_status: 'paid',
+        }).select().single();
+        if (wErr) throw wErr;
+        if (receiverId) {
+          await supabase.from('notifications').insert({
+            user_id: receiverId, title: '📦 Package coming your way!',
+            body: `${(profile as any).full_name} is sending you a package.`,
+            type: 'new_order', order_id: newOrder.id, read: false,
+          });
+        }
+        setLoading(false);
+        setSuccess(true);
+        setTimeout(() => setSuccess(false), 5000);
+        return;
+      }
+
       const { data: newOrder, error } = await supabase.from('orders').insert({
         sender_id: profile.id, sender_name: (profile as any).full_name,
         sender_number: (profile as any).phone_number,
@@ -407,14 +511,12 @@ export function SenderOrderView({ onPriceRequest }: {
         weather_condition: weatherCond, road_condition: roadCond,
         payer_name:    payerName,
         payer_number:  `${payerPhone.code}${payerPhone.number}`,
-        // ── Wait for Noor payment before drivers see it ──
         status:         'awaiting_payment',
         sender_paid:    false,
         payment_status: 'awaiting_payment',
       }).select().single();
       if (error) throw error;
 
-      // ── Noor MoMo Payment ─────────────────────────────────────────────────
       setPaymentStep('requesting');
       const NOOR_URL = (import.meta as any).env?.VITE_NOOR_URL || 'http://localhost:3001';
       const NOOR_KEY = (import.meta as any).env?.VITE_NOOR_API_KEY || '';
@@ -624,51 +726,31 @@ export function SenderOrderView({ onPriceRequest }: {
       {/* ── PAYMENT ── */}
       <div className="card">
         <Sec icon={DollarSign} title="Payment Details" color="var(--green)" />
-        <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '10px', fontWeight: 600 }}>Payment method</p>
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-          {[{ id:'MTN MoMo',abbr:'MTN',bg:'#FFD600',tc:'#000'},{ id:'Airtel Money',abbr:'AM',bg:'#E30613',tc:'#fff'}].map(m => (
-            <div key={m.id} onClick={() => setPaymentMethod(m.id)}
-              style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '10px', padding: '12px', borderRadius: '10px', cursor: 'pointer', transition: 'all .15s', background: paymentMethod === m.id ? 'var(--yellow-dim)' : 'var(--bg3)', border: `1px solid ${paymentMethod === m.id ? 'rgba(245,197,24,0.35)' : 'var(--border)'}` }}>
-              <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: m.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                <span style={{ fontSize: '9px', fontWeight: 900, color: m.tc, fontFamily: 'JetBrains Mono,monospace' }}>{m.abbr}</span>
-              </div>
-              <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text)' }}>{m.id}</span>
-            </div>
-          ))}
-        </div>
-        <div style={{ height: '1px', background: 'var(--border)', marginBottom: '16px' }} />
-        <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '10px', fontWeight: 600 }}>Who is paying? — MoMo prompt will be sent to this number</p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div>
-            <label className="eg-label">Name on {paymentMethod} Account</label>
-            <input className="eg-input" required placeholder="Full name registered on MoMo" value={payerName} onChange={e => setPayerName(e.target.value)} />
-          </div>
-          <PhoneInput label={`${paymentMethod} Phone Number`} value={payerPhone} onChange={v => { setPayerPhone(v); setPayerPhoneErr(validatePhone(v.code, v.number)); }} error={payerPhoneErr} />
-          {(profile as any)?.phone_number && (
-            <button type="button" onClick={() => {
-              const raw = ((profile as any).phone_number as string).replace(/\s/g,'');
-              const number = raw.startsWith('+') ? raw.slice(raw.indexOf('2')+2) : raw.replace(/^250/,'');
-              setPayerName((profile as any).full_name || '');
-              setPayerPhone({ code: '+250', number });
-              setPayerPhoneErr(null);
-            }} style={{ alignSelf: 'flex-start', padding: '6px 12px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '8px', cursor: 'pointer', fontFamily: 'Space Grotesk,sans-serif', fontSize: '11px', fontWeight: 700, color: 'var(--text3)' }}>
-              👤 Use my account — {(profile as any)?.full_name}
-            </button>
-          )}
-          {payerName && !validatePhone(payerPhone.code, payerPhone.number) && (
-            <div style={{ padding: '10px 14px', background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={{ fontSize: '20px' }}>{paymentMethod === 'MTN MoMo' ? '🟡' : '🔴'}</span>
+        {walletLoaded ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px', background: 'rgba(34,197,94,0.07)', border: '2px solid rgba(34,197,94,0.35)', borderRadius: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ fontSize: '26px' }}>👛</span>
               <div>
-                <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>{payerName}</p>
-                <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>{payerPhone.code} {payerPhone.number} · {paymentMethod}</p>
+                <p style={{ fontWeight: 700, fontSize: '14px', color: 'var(--green)' }}>Wallet Payment</p>
+                <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '2px' }}>Balance: <strong style={{ color: walletBalance >= predictedPrice ? 'var(--green)' : 'var(--red)' }}>{walletBalance.toLocaleString()} RWF</strong></p>
               </div>
-              <CheckCircle size={16} color="var(--green)" style={{ marginLeft: 'auto', flexShrink: 0 }} />
             </div>
-          )}
-        </div>
+            <CheckCircle size={20} color="var(--green)" />
+          </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 0' }}>
+            <div className="spinner" style={{ width: '14px', height: '14px' }} />
+            <p style={{ fontSize: '12px', color: 'var(--text3)' }}>Loading wallet…</p>
+          </div>
+        )}
+        {walletLoaded && walletBalance < predictedPrice && predictedPrice > 0 && (
+          <div style={{ marginTop: '10px', padding: '10px 14px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px' }}>
+            <p style={{ fontSize: '12px', color: 'var(--red)', fontWeight: 600 }}>⚠️ Insufficient balance — top up your wallet in Profile tab before placing order</p>
+          </div>
+        )}
       </div>
 
-      {/* ── CONDITIONS ── */}
+            {/* ── CONDITIONS ── */}
       <div className="card">
         <Sec icon={CloudRain} title="Delivery Conditions" color="var(--blue)" />
         {!conditionsReady ? (
@@ -733,7 +815,7 @@ export function SenderOrderView({ onPriceRequest }: {
         <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '14px', padding: '18px', textAlign: 'center' }}>
           <p style={{ fontSize: '13px', color: 'var(--text3)', fontWeight: 600, marginBottom: '12px' }}>📋 Complete all steps to see AI price</p>
           <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
-            {[{ label:'Receiver', done: receiverReady },{ label:'Package', done: !!packageWeight },{ label:'Payer info', done: !!payerName && !validatePhone(payerPhone.code, payerPhone.number) }].map(c => (
+            {[{ label:'Receiver', done: receiverReady },{ label:'Package', done: !!packageWeight },{ label:'Wallet', done: walletBalance >= predictedPrice && predictedPrice > 0 }].map(c => (
               <span key={c.label} style={{ fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: '20px', background: c.done ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.06)', color: c.done ? 'var(--green)' : 'var(--text3)', border: `1px solid ${c.done ? 'rgba(34,197,94,0.25)' : 'var(--border)'}` }}>
                 {c.done ? '✓' : '○'} {c.label}
               </span>
@@ -832,11 +914,12 @@ export function SenderOrderView({ onPriceRequest }: {
       {/* ── SUBMIT — only show when no payment in progress ── */}
       {!paymentStep && (
         <button type="submit" className="btn-yellow"
-          disabled={loading || priceLoading || !priceReady}
+          disabled={loading || priceLoading || !priceReady || walletBalance < predictedPrice}
           style={{ fontSize: '15px', padding: '13px' }}>
-          {loading     ? '⏳ Placing order…'      :
-           !priceReady ? 'Fill all fields first'  :
-           `🚀 Place Order & Pay — ${predictedPrice.toLocaleString()} RWF`}
+          {loading          ? '⏳ Placing order…'                          :
+           !priceReady      ? 'Fill all fields first'                       :
+           walletBalance < predictedPrice ? `⚠️ Top up wallet — need ${predictedPrice.toLocaleString()} RWF` :
+           `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF from Wallet`}
         </button>
       )}
 

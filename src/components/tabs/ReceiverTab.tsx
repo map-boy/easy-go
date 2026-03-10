@@ -193,11 +193,33 @@ export function ReceiverTab() {
   // ── Confirm receipt ───────────────────────────────────────
   async function confirmReceipt(orderId: string) {
     setConfirmingId(orderId);
+    // Get order details to pay driver
+    const { data: ord } = await supabase.from('orders')
+      .select('driver_id, predicted_price, sender_id')
+      .eq('id', orderId).single();
+
     await supabase.from('orders').update({
       receiver_confirmed: true,
+      sender_confirmed:   true,
       status:             'delivered',
       updated_at:         new Date().toISOString(),
     }).eq('id', orderId);
+
+    // Pay driver 70% of delivery fee
+    if (ord?.driver_id && ord?.predicted_price) {
+      const driverEarning = Math.round(ord.predicted_price * 0.7);
+      // Get driver user_id
+      const { data: drv } = await supabase.from('drivers')
+        .select('user_id').eq('id', ord.driver_id).single();
+      if (drv?.user_id) {
+        await supabase.rpc('increment_wallet_balance', { uid: drv.user_id, delta: driverEarning });
+        await supabase.from('wallet_transactions').insert({
+          user_id: drv.user_id, type: 'topup', amount: driverEarning,
+          status: 'completed', description: `Delivery earnings (70%) — order #${orderId.slice(0,8)}`,
+        });
+      }
+    }
+
     setConfirmingId(null);
     loadOrders();
   }

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import L from 'leaflet';
-import { CheckCircle, XCircle, Navigation, Phone, Package, MapPin, Clock } from 'lucide-react';
+import { CheckCircle, XCircle, Navigation, Phone, Package, Clock, Star, Wallet, ArrowUpRight } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { createNotification } from '../../lib/notifications';
@@ -23,23 +22,32 @@ async function fetchRoute(from: [number, number], to: [number, number]) {
 
 export function DriverTab() {
   const { profile } = useAuth();
-  const [driverInfo, setDriverInfo]           = useState<any>(null);
-  const [pendingOrders, setPendingOrders]     = useState<any[]>([]);
-  const [activeOrder, setActiveOrder]         = useState<any>(null);
-  const [myLocation, setMyLocation]           = useState<[number, number] | null>(null);
-  const [routeToSender, setRouteToSender]     = useState<any>(null);
+  const [driverInfo,    setDriverInfo]    = useState<any>(null);
+  const [pendingOrders, setPendingOrders] = useState<any[]>([]);
+  const [activeOrder,   setActiveOrder]   = useState<any>(null);
+  const [myLocation,    setMyLocation]    = useState<[number, number] | null>(null);
+  const [routeToSender,   setRouteToSender]   = useState<any>(null);
   const [routeToReceiver, setRouteToReceiver] = useState<any>(null);
-  const [msg, setMsg]                         = useState('');
-  const [msgType, setMsgType]                 = useState<'success' | 'error'>('success');
-  const [loading, setLoading]                 = useState(true);
-  const [acceptingId, setAcceptingId]         = useState<string | null>(null);
+  const [msg,     setMsg]     = useState('');
+  const [msgType, setMsgType] = useState<'success' | 'error'>('success');
+  const [loading,     setLoading]     = useState(true);
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
+
+  // wallet
+  const [walletBalance,  setWalletBalance]  = useState(0);
+  const [walletTxs,      setWalletTxs]      = useState<any[]>([]);
+  const [showWallet,     setShowWallet]      = useState(false);
+  const [withdrawStep,   setWithdrawStep]   = useState<'idle'|'confirm'|'processing'|'done'|'error'>('idle');
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawPhone,  setWithdrawPhone]  = useState('');
+  const [withdrawErr,    setWithdrawErr]    = useState('');
 
   useEffect(() => {
     loadDriverData();
     startGPS();
     const channel = supabase.channel('driver-orders')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' }, () => loadPendingOrders())
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' }, () => { loadPendingOrders(); loadDriverData(); })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' },  () => loadPendingOrders())
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' },  () => { loadPendingOrders(); loadDriverData(); })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [profile]);
@@ -50,12 +58,8 @@ export function DriverTab() {
       (pos) => {
         const loc: [number, number] = [pos.coords.latitude, pos.coords.longitude];
         setMyLocation(loc);
-        // Push live position to DB so TrackTab can show it
         if (profile?.id) {
-          supabase.from('drivers')
-            .update({ latitude: loc[0], longitude: loc[1] })
-            .eq('user_id', profile.id)
-            .then(() => {});
+          supabase.from('drivers').update({ latitude: loc[0], longitude: loc[1] }).eq('user_id', profile.id).then(() => {});
         }
       },
       () => {},
@@ -65,20 +69,25 @@ export function DriverTab() {
 
   async function loadDriverData() {
     if (!profile) return;
-    const { data: driver } = await supabase
-      .from('drivers').select('*').eq('user_id', profile.id).single();
+    const { data: driver } = await supabase.from('drivers').select('*').eq('user_id', profile.id).single();
     setDriverInfo(driver);
-
     if (driver) {
       const { data: active } = await supabase
         .from('orders')
         .select('*, profiles:sender_id(full_name, phone_number, latitude, longitude), receiver:receiver_id(full_name, phone_number, latitude, longitude)')
         .eq('driver_id', driver.id)
-        .in('status', ['accepted', 'in_transit'])
+        .in('status', ['accepted', 'in_transit', 'delivered'])
+        .order('updated_at', { ascending: false })
+        .limit(1)
         .maybeSingle();
       setActiveOrder(active || null);
+      // load wallet
+      const { data: prof } = await supabase.from('profiles').select('wallet_balance, phone_number').eq('id', profile.id).single();
+      setWalletBalance(prof?.wallet_balance ?? 0);
+      setWithdrawPhone(prof?.phone_number ?? '');
+      const { data: txs } = await supabase.from('wallet_transactions').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }).limit(10);
+      setWalletTxs(txs || []);
     }
-
     await loadPendingOrders();
     setLoading(false);
   }
@@ -93,7 +102,6 @@ export function DriverTab() {
     setPendingOrders(data || []);
   }
 
-  // Compute distances when active order or GPS changes
   useEffect(() => {
     if (!activeOrder || !myLocation) return;
     const senderPos: [number, number] | null =
@@ -136,7 +144,7 @@ export function DriverTab() {
       await createNotification(order.receiver_id, '📦 Your Package is Coming!',
         `A driver has accepted delivery to ${order.receiver_location}`, 'order_accepted', order.id);
     }
-    notify('✅ Order accepted! Check the Track tab to navigate.');
+    notify('✅ Order accepted! Navigate to pickup.');
     loadDriverData();
   }
 
@@ -155,21 +163,59 @@ export function DriverTab() {
 
   async function markDelivered() {
     if (!activeOrder) return;
+    // Mark as delivered — driver confirmed. Sender must still confirm.
     await supabase.from('orders').update({
       status: 'delivered', driver_confirmed: true, updated_at: new Date().toISOString(),
     }).eq('id', activeOrder.id);
-    await createNotification(activeOrder.sender_id, '✅ Package Delivered!',
-      `Your package has been delivered to ${activeOrder.receiver_location}`, 'delivered', activeOrder.id);
+    await createNotification(activeOrder.sender_id, '✅ Package Delivered — Please Confirm!',
+      `Your package has been delivered to ${activeOrder.receiver_location}. Open the app to confirm and release payment.`, 'delivered', activeOrder.id);
     if (activeOrder.receiver_id) {
       await createNotification(activeOrder.receiver_id, '🎉 Package Arrived!',
         `Your package has been delivered. Please confirm receipt.`, 'delivered', activeOrder.id);
     }
-    setRouteToSender(null); setRouteToReceiver(null); setActiveOrder(null);
-    notify('🎉 Delivered! Great job!');
+    setRouteToSender(null); setRouteToReceiver(null);
+    notify('🎉 Marked as delivered! Waiting for sender to confirm.');
     loadDriverData();
   }
 
+  // ── WITHDRAW ──────────────────────────────────────────────────────────────
+  async function handleWithdraw() {
+    const amount = parseInt(withdrawAmount.replace(/\D/g, ''));
+    if (!amount || amount < 500) { setWithdrawErr('Minimum withdrawal is 500 RWF'); return; }
+    if (amount > walletBalance)  { setWithdrawErr('Insufficient wallet balance'); return; }
+    if (!withdrawPhone.trim())   { setWithdrawErr('Enter your MoMo phone number'); return; }
+    setWithdrawErr('');
+    setWithdrawStep('processing');
+    try {
+      const NOOR_URL = (import.meta as any).env?.VITE_NOOR_URL || 'http://localhost:3001';
+      const NOOR_KEY = (import.meta as any).env?.VITE_NOOR_API_KEY || '';
+      // Deduct from wallet immediately
+      await supabase.rpc('increment_wallet_balance', { uid: profile!.id, delta: -amount });
+      await supabase.from('wallet_transactions').insert({
+        user_id: profile!.id, type: 'payment', amount,
+        status: 'completed', description: `Withdrawal to MoMo ${withdrawPhone}`,
+      });
+      // Request payout via Noor (deposit to driver's MoMo)
+      const phone = withdrawPhone.startsWith('+') ? withdrawPhone : `+250${withdrawPhone.replace(/^0/, '')}`;
+      try {
+        await fetch(`${NOOR_URL}/payments/deposit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': NOOR_KEY },
+          body: JSON.stringify({ amount, phoneNumber: phone, payeeName: profile!.full_name, note: 'Easy GO driver payout' }),
+        });
+      } catch (_) { /* payout API optional — balance already deducted */ }
+      setWithdrawStep('done');
+      loadDriverData();
+    } catch {
+      setWithdrawStep('error');
+      setWithdrawErr('Withdrawal failed. Try again.');
+    }
+  }
+
   if (loading) return <div style={{ textAlign: 'center', padding: '60px 0' }}><div className="spinner" /></div>;
+
+  const pendingPayment = activeOrder?.status === 'delivered' && activeOrder?.driver_confirmed && !activeOrder?.sender_confirmed;
+  const driverEarnings70 = activeOrder ? Math.round((activeOrder.predicted_price || 0) * 0.7) : 0;
 
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100%' }}>
@@ -194,9 +240,9 @@ export function DriverTab() {
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
           {[
-            { label: 'Plate',  value: driverInfo?.plate_number || '—',               color: 'var(--yellow)' },
+            { label: 'Plate',  value: driverInfo?.plate_number || '—',                  color: 'var(--yellow)' },
             { label: 'Status', value: driverInfo?.is_on_duty ? 'Available' : 'Offline', color: driverInfo?.is_on_duty ? 'var(--green)' : 'var(--text3)' },
-            { label: 'GPS',    value: myLocation ? 'Live' : 'Off',                   color: myLocation ? 'var(--green)' : 'var(--red)' },
+            { label: 'GPS',    value: myLocation ? 'Live' : 'Off',                      color: myLocation ? 'var(--green)' : 'var(--red)' },
           ].map(item => (
             <div key={item.label} style={{ flex: 1, background: 'var(--bg3)', borderRadius: '10px', padding: '10px', textAlign: 'center' }}>
               <p style={{ fontSize: '10px', color: 'var(--text3)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '4px' }}>{item.label}</p>
@@ -208,24 +254,98 @@ export function DriverTab() {
 
       <div style={{ padding: '16px' }}>
 
+        {/* ── WALLET CARD ── */}
+        <div style={{ background: 'linear-gradient(135deg, #0a0a0a 0%, #111c2e 100%)', border: '1px solid rgba(245,197,24,0.2)', borderRadius: '14px', padding: '16px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Wallet size={15} color="#f5c518" />
+              <span style={{ fontWeight: 700, fontSize: '13px', color: '#fff' }}>My Wallet</span>
+            </div>
+            <button onClick={() => setShowWallet(v => !v)} style={{ background: 'rgba(245,197,24,0.1)', border: '1px solid rgba(245,197,24,0.25)', borderRadius: '8px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 700, color: '#f5c518' }}>
+              {showWallet ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          <p style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: '28px', fontWeight: 900, color: '#fff', letterSpacing: '-.02em', marginBottom: '2px' }}>
+            {walletBalance.toLocaleString()} <span style={{ fontSize: '13px', fontWeight: 600, color: 'rgba(255,255,255,0.4)' }}>RWF</span>
+          </p>
+          <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)' }}>Available earnings</p>
+
+          {showWallet && (
+            <div style={{ marginTop: '14px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '14px' }}>
+              {/* Withdraw form */}
+              {withdrawStep === 'idle' || withdrawStep === 'error' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <p style={{ fontSize: '12px', fontWeight: 700, color: 'rgba(255,255,255,0.6)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Withdraw to MoMo</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '6px' }}>
+                    {[1000, 2000, 5000, 10000].map(a => (
+                      <button key={a} onClick={() => setWithdrawAmount(String(a))}
+                        style={{ padding: '7px 4px', background: withdrawAmount === String(a) ? '#f5c518' : 'rgba(255,255,255,0.06)', border: `1px solid ${withdrawAmount === String(a) ? '#f5c518' : 'rgba(255,255,255,0.1)'}`, borderRadius: '8px', cursor: 'pointer', fontSize: '11px', fontWeight: 700, color: withdrawAmount === String(a) ? '#0a0a0a' : 'rgba(255,255,255,0.6)', fontFamily: 'Space Grotesk, sans-serif' }}>
+                        {a >= 1000 ? `${a/1000}k` : a}
+                      </button>
+                    ))}
+                  </div>
+                  <input type="number" placeholder="Custom amount (RWF)" value={withdrawAmount} onChange={e => setWithdrawAmount(e.target.value)}
+                    style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '8px', padding: '10px 12px', fontSize: '14px', fontWeight: 700, color: '#fff', fontFamily: 'Space Grotesk, sans-serif', outline: 'none', boxSizing: 'border-box', width: '100%' }} />
+                  <input type="tel" placeholder="MoMo phone (+250...)" value={withdrawPhone} onChange={e => setWithdrawPhone(e.target.value)}
+                    style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '8px', padding: '10px 12px', fontSize: '13px', color: '#fff', fontFamily: 'Space Grotesk, sans-serif', outline: 'none', boxSizing: 'border-box', width: '100%' }} />
+                  {withdrawErr && <p style={{ fontSize: '12px', color: '#ef4444', fontWeight: 600 }}>⚠️ {withdrawErr}</p>}
+                  <button onClick={handleWithdraw}
+                    style={{ width: '100%', padding: '11px', background: '#f5c518', border: 'none', borderRadius: '10px', fontWeight: 800, fontSize: '13px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                    <ArrowUpRight size={14} /> Withdraw to MoMo
+                  </button>
+                </div>
+              ) : withdrawStep === 'processing' ? (
+                <div style={{ textAlign: 'center', padding: '10px 0' }}>
+                  <div className="spinner" style={{ width: '28px', height: '28px', margin: '0 auto 8px' }} />
+                  <p style={{ fontSize: '13px', color: 'rgba(255,255,255,0.6)' }}>Processing withdrawal…</p>
+                </div>
+              ) : withdrawStep === 'done' ? (
+                <div style={{ textAlign: 'center', padding: '10px 0' }}>
+                  <p style={{ fontSize: '28px', marginBottom: '6px' }}>🎉</p>
+                  <p style={{ fontWeight: 700, fontSize: '14px', color: '#22c55e', marginBottom: '4px' }}>Withdrawal sent!</p>
+                  <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.4)', marginBottom: '10px' }}>Check your MoMo for confirmation</p>
+                  <button onClick={() => { setWithdrawStep('idle'); setWithdrawAmount(''); }} style={{ padding: '8px 20px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '8px', cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: 'rgba(255,255,255,0.7)' }}>
+                    Withdraw Again
+                  </button>
+                </div>
+              ) : null}
+
+              {/* Recent earnings */}
+              {walletTxs.length > 0 && (
+                <div style={{ marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.07)', paddingTop: '12px' }}>
+                  <p style={{ fontSize: '11px', fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '8px' }}>Recent</p>
+                  {walletTxs.slice(0, 5).map(tx => (
+                    <div key={tx.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.5)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description}</p>
+                      <p style={{ fontSize: '12px', fontWeight: 800, color: tx.type === 'payment' ? '#ef4444' : '#22c55e', whiteSpace: 'nowrap', marginLeft: '8px' }}>
+                        {tx.type === 'payment' ? '−' : '+'}{tx.amount.toLocaleString()}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* ── ACTIVE ORDER CARD ── */}
-        {activeOrder && (
+        {activeOrder && !['delivered'].includes(activeOrder.status) ? (
           <div style={{ background: 'rgba(59,130,246,0.06)', border: '2px solid rgba(59,130,246,0.3)', borderRadius: '14px', padding: '14px', marginBottom: '16px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
               <p style={{ fontWeight: 800, fontSize: '14px', color: 'var(--blue)' }}>🚀 Active Order in Progress</p>
               <span className={`badge ${activeOrder.status === 'in_transit' ? 'badge-blue' : 'badge-green'}`}>{activeOrder.status}</span>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '10px' }}>{activeOrder.sender_location} → {activeOrder.receiver_location}</p>
-
-            {/* Distance info */}
+            <div style={{ background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.2)', borderRadius: '8px', padding: '8px 12px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '12px', color: 'var(--text3)', fontWeight: 600 }}>Your 70% earnings</span>
+              <span style={{ fontSize: '16px', fontWeight: 800, color: 'var(--yellow)' }}>{driverEarnings70.toLocaleString()} RWF</span>
+            </div>
             {(routeToSender || routeToReceiver) && (
               <div style={{ background: 'var(--bg2)', borderRadius: '8px', padding: '8px 10px', marginBottom: '10px' }}>
                 {routeToSender   && <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--yellow)', marginBottom: routeToReceiver ? '4px' : 0 }}>🟡 You → Pickup: {routeToSender.distanceKm} km · ~{routeToSender.durationMin} min</p>}
                 {routeToReceiver && <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--green)' }}>🟢 Pickup → Dropoff: {routeToReceiver.distanceKm} km · ~{routeToReceiver.durationMin} min</p>}
               </div>
             )}
-
-            {/* Sender / Receiver detail */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px' }}>
               <div style={{ background: 'var(--bg2)', borderRadius: '8px', padding: '10px' }}>
                 <p style={{ fontSize: '10px', color: 'var(--text3)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '.06em', marginBottom: '4px' }}>📤 Pickup</p>
@@ -240,7 +360,6 @@ export function DriverTab() {
                 <p style={{ fontSize: '11px', color: 'var(--blue)', display: 'flex', alignItems: 'center', gap: '3px' }}><Phone size={9} />{activeOrder.receiver?.phone_number}</p>
               </div>
             </div>
-
             <div style={{ display: 'flex', gap: '8px' }}>
               {activeOrder.status === 'accepted' && (
                 <button onClick={markPickedUp} style={{ flex: 1, background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.35)', borderRadius: '10px', padding: '11px', color: 'var(--blue)', cursor: 'pointer', fontWeight: 800, fontSize: '13px', fontFamily: 'Space Grotesk, sans-serif' }}>
@@ -249,22 +368,44 @@ export function DriverTab() {
               )}
               {activeOrder.status === 'in_transit' && (
                 <button onClick={markDelivered} style={{ flex: 1, background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.35)', borderRadius: '10px', padding: '11px', color: 'var(--green)', cursor: 'pointer', fontWeight: 800, fontSize: '13px', fontFamily: 'Space Grotesk, sans-serif' }}>
-                  ✅ Mark as Delivered
+                  ✅ Confirm Delivered
                 </button>
               )}
             </div>
           </div>
-        )}
+        ) : activeOrder?.status === 'delivered' && activeOrder?.driver_confirmed && !activeOrder?.sender_confirmed ? (
+          // Waiting for sender to confirm
+          <div style={{ background: 'rgba(245,197,24,0.06)', border: '2px solid rgba(245,197,24,0.3)', borderRadius: '14px', padding: '14px', marginBottom: '16px', textAlign: 'center' }}>
+            <p style={{ fontSize: '28px', marginBottom: '8px' }}>⏳</p>
+            <p style={{ fontWeight: 800, fontSize: '15px', color: 'var(--yellow)', marginBottom: '6px' }}>Waiting for sender to confirm delivery</p>
+            <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '12px' }}>Once sender confirms, <strong style={{ color: 'var(--yellow)' }}>{driverEarnings70.toLocaleString()} RWF</strong> (70%) will be added to your wallet.</p>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '6px' }}>
+              {[0,1,2].map(i => <div key={i} style={{ width: '7px', height: '7px', borderRadius: '50%', background: 'var(--yellow)', animation: `tt-dot 1.4s ease ${i*0.2}s infinite` }} />)}
+            </div>
+          </div>
+        ) : activeOrder?.status === 'delivered' && activeOrder?.sender_confirmed ? (
+          // Payment received
+          <div style={{ background: 'rgba(34,197,94,0.06)', border: '2px solid rgba(34,197,94,0.3)', borderRadius: '14px', padding: '14px', marginBottom: '16px', textAlign: 'center' }}>
+            <p style={{ fontSize: '28px', marginBottom: '8px' }}>🎉</p>
+            <p style={{ fontWeight: 800, fontSize: '15px', color: 'var(--green)', marginBottom: '4px' }}>Payment received!</p>
+            <p style={{ fontSize: '13px', color: 'var(--text3)' }}>
+              <strong style={{ color: 'var(--green)' }}>{driverEarnings70.toLocaleString()} RWF</strong> added to your wallet
+            </p>
+            {activeOrder.sender_rating > 0 && (
+              <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
+                {[1,2,3,4,5].map(s => <Star key={s} size={16} color={s <= activeOrder.sender_rating ? '#f5c518' : 'var(--border2)'} fill={s <= activeOrder.sender_rating ? '#f5c518' : 'none'} />)}
+                {activeOrder.sender_comment && <span style={{ fontSize: '12px', color: 'var(--text3)', marginLeft: '6px' }}>"{activeOrder.sender_comment}"</span>}
+              </div>
+            )}
+          </div>
+        ) : null}
 
         {/* ── AVAILABLE ORDERS ── */}
         {driverInfo?.is_on_duty ? (
           <>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <h3 style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text)' }}>
-                📋 Available Orders ({pendingOrders.length})
-              </h3>
+              <h3 style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text)' }}>📋 Available Orders ({pendingOrders.length})</h3>
             </div>
-
             {pendingOrders.length === 0 ? (
               <div className="card" style={{ textAlign: 'center', padding: '32px' }}>
                 <Navigation size={24} color="var(--text3)" style={{ margin: '0 auto 10px' }} />
@@ -280,9 +421,11 @@ export function DriverTab() {
                     {order.status === 'awaiting_payment' && <span style={{ fontSize: '10px', fontWeight: 700, color: '#f97316', background: 'rgba(249,115,22,0.1)', border: '1px solid rgba(249,115,22,0.3)', borderRadius: '6px', padding: '2px 7px', display: 'inline-block', marginTop: '4px' }}>⏳ Awaiting payment</span>}
                     {order.status === 'pending'          && <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--green)', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '6px', padding: '2px 7px', display: 'inline-block', marginTop: '4px' }}>✅ Paid — Ready to accept</span>}
                   </div>
-                  <p style={{ fontWeight: 800, fontSize: '16px', color: 'var(--yellow)' }}>{(order.predicted_price || 0).toLocaleString()} RWF</p>
+                  <div style={{ textAlign: 'right' }}>
+                    <p style={{ fontWeight: 800, fontSize: '16px', color: 'var(--yellow)' }}>{(order.predicted_price || 0).toLocaleString()} RWF</p>
+                    <p style={{ fontSize: '11px', color: 'var(--green)', fontWeight: 700 }}>You get: {Math.round((order.predicted_price || 0) * 0.7).toLocaleString()} RWF</p>
+                  </div>
                 </div>
-
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px' }}>
                   <div style={{ background: 'var(--bg3)', borderRadius: '8px', padding: '10px' }}>
                     <p style={{ fontSize: '10px', color: 'var(--text3)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '.06em', marginBottom: '4px' }}>📤 From</p>
@@ -297,17 +440,12 @@ export function DriverTab() {
                     {order.receiver?.phone_number && <p style={{ fontSize: '11px', color: 'var(--blue)', display: 'flex', alignItems: 'center', gap: '3px' }}><Phone size={9} />{order.receiver.phone_number}</p>}
                   </div>
                 </div>
-
                 <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '12px' }}>
                   <Package size={11} style={{ display: 'inline', marginRight: '4px' }} />{order.package_size} · {order.package_weight}
                 </p>
-
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    onClick={() => acceptOrder(order)}
-                    disabled={acceptingId === order.id || order.status === 'awaiting_payment'}
-                    style={{ flex: 1, background: order.status === 'awaiting_payment' ? 'rgba(249,115,22,0.08)' : 'rgba(34,197,94,0.1)', border: `1px solid ${order.status === 'awaiting_payment' ? 'rgba(249,115,22,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: '10px', padding: '12px', color: order.status === 'awaiting_payment' ? '#f97316' : 'var(--green)', cursor: order.status === 'awaiting_payment' ? 'not-allowed' : 'pointer', fontWeight: 800, fontSize: '14px', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', opacity: acceptingId === order.id ? 0.5 : 1 }}
-                  >
+                  <button onClick={() => acceptOrder(order)} disabled={acceptingId === order.id || order.status === 'awaiting_payment'}
+                    style={{ flex: 1, background: order.status === 'awaiting_payment' ? 'rgba(249,115,22,0.08)' : 'rgba(34,197,94,0.1)', border: `1px solid ${order.status === 'awaiting_payment' ? 'rgba(249,115,22,0.3)' : 'rgba(34,197,94,0.3)'}`, borderRadius: '10px', padding: '12px', color: order.status === 'awaiting_payment' ? '#f97316' : 'var(--green)', cursor: order.status === 'awaiting_payment' ? 'not-allowed' : 'pointer', fontWeight: 800, fontSize: '14px', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', opacity: acceptingId === order.id ? 0.5 : 1 }}>
                     {acceptingId === order.id ? '⏳ Accepting...' : order.status === 'awaiting_payment' ? '⏳ Waiting for payment' : <><CheckCircle size={15} /> Accept Order</>}
                   </button>
                   <button style={{ width: '48px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: '10px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
