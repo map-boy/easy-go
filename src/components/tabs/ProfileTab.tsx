@@ -374,7 +374,7 @@ export function ProfileTab() {
         <div style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
 
           {/* Website */}
-          <a href="https://easy-go-delta.vercel.app" target="_blank" rel="noreferrer"
+          <a href="https://wandaatech-web.vercel.app" target="_blank" rel="noreferrer"
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid var(--border)', textDecoration: 'none' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <Globe size={14} color="var(--yellow)" />
@@ -384,7 +384,7 @@ export function ProfileTab() {
           </a>
 
           {/* Privacy Policy */}
-          <a href="https://easy-go-delta.vercel.app/privacy" target="_blank" rel="noreferrer"
+          <a href="https://wandaatech-web.vercel.app/privacy" target="_blank" rel="noreferrer"
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid var(--border)', textDecoration: 'none' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <Shield size={14} color="var(--yellow)" />
@@ -394,7 +394,7 @@ export function ProfileTab() {
           </a>
 
           {/* Terms */}
-          <a href="https://easy-go-delta.vercel.app/terms" target="_blank" rel="noreferrer"
+          <a href="https://wandaatech-web.vercel.app/terms" target="_blank" rel="noreferrer"
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid var(--border)', textDecoration: 'none' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <FileText size={14} color="var(--yellow)" />
