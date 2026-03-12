@@ -5,7 +5,7 @@ import { TrackTab }       from './tabs/TrackTab';
 import { ProfileTab }     from './tabs/ProfileTab';
 import { DriverTab }      from './tabs/DriverTab';
 import { ReceiverTab }    from './tabs/ReceiverTab';
-import { OrderTab }       from './tabs/OrderTab';
+import { MyParcelTab }    from './tabs/MyParcelTab';
 import { useAuth }        from '../contexts/AuthContext';
 
 type TabType = 'home' | 'order' | 'track' | 'profile';
@@ -66,11 +66,11 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
   function renderTab() {
     if (activeTab === 'profile') return <ProfileTab />;
     if (activeTab === 'track') {
-      if (isReceiver) return <ReceiverTab />;
+      if (isReceiver) return <MyParcelTab />;
       return <TrackTab />;
     }
     if (activeTab === 'order') {
-      if (isReceiver) return <OrderTab />;
+      if (isReceiver) return <ReceiverTab />;
       if (isDriver)   return <DriverTab />;
       return <SenderOrderTab />;
     }
