@@ -213,6 +213,7 @@ export function ReceiverOrderView({ onClose }: { onClose?: () => void } = {}) {
       const { data: orderData, error: orderError } = await supabase
         .from('food_orders').insert({
           user_id:          profile.id,
+          receiver_id:      profile.id,         // so MyParcel tab can show this order
           items:            cart.map(c => ({ id: c.id, name: c.name, qty: c.qty, price: c.price })),
           subtotal,
           delivery_fee:     deliveryFee,
@@ -220,6 +221,10 @@ export function ReceiverOrderView({ onClose }: { onClose?: () => void } = {}) {
           delivery_address: address,
           payment_method:   'wallet',
           status:           'pending',
+          receiver_confirmed: false,
+          driver_confirmed:   false,
+          driver_rating:      0,
+          driver_comment:     '',
         }).select('id').single();
 
       if (orderError) {

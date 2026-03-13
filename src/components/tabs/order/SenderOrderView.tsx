@@ -271,6 +271,7 @@ export function SenderOrderView({ onPriceRequest }: {
   const [roadCond,        setRoadCond]        = useState<'good'|'moderate'|'poor'>('good');
   const [conditionsReady, setConditionsReady] = useState(false);
   const [emergencyNote, setEmergencyNote] = useState('');
+  const offlinePriceCeilingRef = useRef<number>(0);  // GPS price is always capped to this
   const [predictedPrice, setPredictedPrice] = useState(0);
   const [priceLoading,   setPriceLoading]   = useState(false);
   const [priceReady,     setPriceReady]     = useState(false);
@@ -366,7 +367,10 @@ export function SenderOrderView({ onPriceRequest }: {
 
   // ── EARLY OFFLINE PREVIEW: fires as soon as receiver location is typed ──────
   // Gives instant price even before all fields are filled
-  const receiverLocText = receiverHasApp ? (selectedReceiver?.location || '') : manualLocation;
+  // Combine location + district for best zone matching
+  const receiverLocText = receiverHasApp
+    ? [selectedReceiver?.location, selectedReceiver?.district].filter(Boolean).join(' ')
+    : manualLocation;
   const senderLocText   = (profile as any)?.location || '';
 
   useEffect(() => {
@@ -381,17 +385,18 @@ export function SenderOrderView({ onPriceRequest }: {
       isRapid:          deliverySpeed === 'rapid',
     });
     if (result) {
+      offlinePriceCeilingRef.current = result.priceRwf;  // store ceiling for GPS cap
       setPredictedPrice(result.priceRwf);
       setPriceSource('offline');
       setOfflineZones({ from: result.fromZone, to: result.toZone, confidence: result.confidence });
       setPriceReady(true);
     }
-  }, [receiverLocText, senderLocText, packageSize, weatherCond, roadCond, deliverySpeed]);
+  }, [receiverLocText, senderLocText, packageSize, weatherCond, roadCond, deliverySpeed, selectedReceiver?.id]);
 
   // ── FULL PRICE (offline instant + GPS race) fires when all fields filled ────
   useEffect(() => {
     if (allFilled) calculatePrice();
-    else if (!receiverLocText) { setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null); setPriceSource(null); setOfflineZones(null); }
+    else if (!receiverLocText) { offlinePriceCeilingRef.current = 0; setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null); setPriceSource(null); setOfflineZones(null); }
   }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat, packageSize, weatherCond, roadCond, isFragile, deliverySpeed]);
 
   async function calculatePrice() {
@@ -402,8 +407,10 @@ export function SenderOrderView({ onPriceRequest }: {
     const badRoads = roadCond === 'poor';
 
     // ── STEP 1: Offline price fires INSTANTLY ────────────────────────────────
-    const senderLoc   = (profile as any)?.location || '';
-    const receiverLoc = receiverHasApp ? (selectedReceiver?.location || '') : manualLocation;
+    const senderLoc   = [(profile as any)?.location, (profile as any)?.district].filter(Boolean).join(' ');
+    const receiverLoc = receiverHasApp
+      ? [selectedReceiver?.location, selectedReceiver?.district].filter(Boolean).join(' ')
+      : manualLocation;
 
     const offlineResult = offlinePrice({
       senderLocation:   senderLoc,
@@ -416,7 +423,7 @@ export function SenderOrderView({ onPriceRequest }: {
     });
 
     if (offlineResult) {
-      // Show offline estimate immediately while GPS loads
+      offlinePriceCeilingRef.current = offlineResult.priceRwf;  // update ceiling
       setPredictedPrice(offlineResult.priceRwf);
       setPriceSource('offline');
       setOfflineZones({ from: offlineResult.fromZone, to: offlineResult.toZone, confidence: offlineResult.confidence });
@@ -469,8 +476,12 @@ export function SenderOrderView({ onPriceRequest }: {
         if (roadCond === 'moderate') final = Math.round(final * 1.1);
         if (deliverySpeed === 'rapid') final = Math.round(final * 1.2);
 
-        // GPS won — update price and mark as precise
-        setPredictedPrice(Math.max(final, 1500));
+        // GPS won — always cap against the stored offline ceiling
+        // This protects against bad GPS locations inflating the price
+        const gpsFinal = Math.max(final, 1500);
+        const ceiling = offlinePriceCeilingRef.current;
+        const cappedFinal = ceiling > 0 ? Math.min(gpsFinal, ceiling) : gpsFinal;
+        setPredictedPrice(cappedFinal);
         setPriceSource('gps');
         setOfflineZones(null);
         setPriceReady(true);

@@ -82,6 +82,12 @@ export function MyParcelTab() {
   const [payStatus,    setPayStatus]    = useState<Record<string, string>>({});
   const [payingId,     setPayingId]     = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [ratingOrderId,  setRatingOrderId]  = useState<string | null>(null);
+  const [ratingDriver,   setRatingDriver]   = useState<string>('');
+  const [starRating,     setStarRating]     = useState(0);
+  const [ratingComment,  setRatingComment]  = useState('');
+  const [ratingLoading,  setRatingLoading]  = useState(false);
+  const [hoverStar,      setHoverStar]      = useState(0);
 
   useEffect(() => {
     loadOrders();
@@ -97,7 +103,7 @@ export function MyParcelTab() {
       supabase
         .from('orders')
         .select(`*, drivers:driver_id(plate_number, user_id, latitude, longitude, profiles:user_id(full_name, phone_number))`)
-        .or(`receiver_id.eq.${profile.id},receiver_number.eq.${profile.phone_number}`)
+        .or(`receiver_id.eq.${profile.id},receiver_number.eq.${profile.phone_number},sender_id.eq.${profile.id}`)
         .order('created_at', { ascending: false }),
       supabase
         .from('food_orders')
@@ -193,17 +199,55 @@ export function MyParcelTab() {
 
   async function confirmReceipt(orderId: string) {
     setConfirmingId(orderId);
-    const { data: ord } = await supabase.from('orders').select('driver_id, predicted_price').eq('id', orderId).single();
+    const { data: ord } = await supabase.from('orders').select('driver_id, predicted_price, drivers:driver_id(user_id, profiles:user_id(full_name))').eq('id', orderId).single();
     await supabase.from('orders').update({ receiver_confirmed: true, sender_confirmed: true, status: 'delivered', updated_at: new Date().toISOString() }).eq('id', orderId);
     if (ord?.driver_id && ord?.predicted_price) {
       const earning = Math.round(ord.predicted_price * 0.7);
-      const { data: drv } = await supabase.from('drivers').select('user_id').eq('id', ord.driver_id).single();
-      if (drv?.user_id) {
-        await supabase.rpc('increment_wallet_balance', { uid: drv.user_id, delta: earning });
-        await supabase.from('wallet_transactions').insert({ user_id: drv.user_id, type: 'topup', amount: earning, status: 'completed', description: `Delivery earnings (70%) — order #${orderId.slice(0, 8)}` });
+      const driverUserId = (ord as any).drivers?.user_id;
+      if (driverUserId) {
+        await supabase.rpc('increment_wallet_balance', { uid: driverUserId, delta: earning });
+        await supabase.from('wallet_transactions').insert({ user_id: driverUserId, type: 'topup', amount: earning, status: 'completed', description: `Delivery earnings (70%) — order #${orderId.slice(0, 8)}` });
       }
     }
     setConfirmingId(null);
+    loadOrders();
+    // Open rating modal
+    const driverName = (ord as any)?.drivers?.profiles?.full_name || 'your driver';
+    setRatingDriver(driverName);
+    setRatingOrderId(orderId);
+    setStarRating(0);
+    setRatingComment('');
+  }
+
+  async function confirmFoodReceipt(orderId: string) {
+    setConfirmingId(orderId);
+    const { data: ord } = await supabase.from('food_orders').select('total, driver_user_id').eq('id', orderId).single();
+    await supabase.from('food_orders').update({ receiver_confirmed: true, status: 'delivered', updated_at: new Date().toISOString() }).eq('id', orderId);
+    if (ord?.driver_user_id && ord?.total) {
+      const earning = Math.round(ord.total * 0.20);
+      await supabase.rpc('increment_wallet_balance', { uid: ord.driver_user_id, delta: earning });
+      await supabase.from('wallet_transactions').insert({ user_id: ord.driver_user_id, type: 'topup', amount: earning, status: 'completed', description: `Shop delivery earnings (20%) — order #${orderId.slice(0, 8)}` });
+    }
+    setConfirmingId(null);
+    loadOrders();
+    setRatingDriver('your driver');
+    setRatingOrderId('food:' + orderId);
+    setStarRating(0);
+    setRatingComment('');
+  }
+
+  async function submitRating() {
+    if (!ratingOrderId || starRating === 0) { setRatingOrderId(null); return; }
+    setRatingLoading(true);
+    const isFood = ratingOrderId.startsWith('food:');
+    const realId = isFood ? ratingOrderId.replace('food:', '') : ratingOrderId;
+    if (isFood) {
+      await supabase.from('food_orders').update({ driver_rating: starRating, driver_comment: ratingComment }).eq('id', realId);
+    } else {
+      await supabase.from('orders').update({ sender_rating: starRating, sender_comment: ratingComment }).eq('id', realId);
+    }
+    setRatingLoading(false);
+    setRatingOrderId(null);
     loadOrders();
   }
 
@@ -269,7 +313,7 @@ export function MyParcelTab() {
               🔴 Active
             </p>
             {activeOrders.map(order => order._type === 'food' ? (
-              <FoodOrderCard key={order.id} order={order} />
+              <FoodOrderCard key={order.id} order={order} onConfirmFood={confirmFoodReceipt} confirmingId={confirmingId} />
             ) : (
               <ActiveOrderCard
                 key={order.id}
@@ -303,6 +347,54 @@ export function MyParcelTab() {
           </>
         )}
       </div>
+
+      {/* ── RATING MODAL ── */}
+      {ratingOrderId && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 4000, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+          onClick={() => setRatingOrderId(null)}>
+          <div style={{ background: 'var(--card)', borderRadius: '20px 20px 0 0', padding: '24px 20px 48px', width: '100%', maxWidth: '480px', border: '1px solid var(--border)' }}
+            onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+              <p style={{ fontWeight: 800, fontSize: '18px', color: 'var(--text)' }}>⭐ Rate Your Driver</p>
+              <button onClick={() => setRatingOrderId(null)} style={{ background: 'var(--bg3)', border: 'none', borderRadius: '50%', width: '30px', height: '30px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)' }}>
+                <X size={14} />
+              </button>
+            </div>
+            <p style={{ fontSize: '13px', color: 'var(--text3)', marginBottom: '20px', textAlign: 'center' }}>How was your experience with <strong style={{ color: 'var(--text)' }}>{ratingDriver}</strong>?</p>
+            {/* Stars */}
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '20px' }}>
+              {[1,2,3,4,5].map(s => (
+                <button key={s}
+                  onClick={() => setStarRating(s)}
+                  onMouseEnter={() => setHoverStar(s)}
+                  onMouseLeave={() => setHoverStar(0)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px' }}>
+                  <Star size={38} color={(hoverStar || starRating) >= s ? '#f5c518' : 'var(--border2)'} fill={(hoverStar || starRating) >= s ? '#f5c518' : 'none'} />
+                </button>
+              ))}
+            </div>
+            {starRating > 0 && (
+              <p style={{ textAlign: 'center', fontSize: '14px', fontWeight: 700, color: 'var(--yellow)', marginBottom: '16px' }}>
+                {starRating === 1 ? '😞 Poor' : starRating === 2 ? '😐 Fair' : starRating === 3 ? '🙂 Good' : starRating === 4 ? '😊 Great' : '🤩 Excellent!'}
+              </p>
+            )}
+            {/* Comment */}
+            <textarea placeholder="Leave a comment (optional)…" value={ratingComment} onChange={e => setRatingComment(e.target.value)}
+              style={{ width: '100%', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '10px', padding: '12px 14px', fontSize: '14px', color: 'var(--text)', fontFamily: 'Space Grotesk, sans-serif', outline: 'none', resize: 'none', minHeight: '80px', boxSizing: 'border-box', marginBottom: '14px' }} />
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button onClick={() => setRatingOrderId(null)}
+                style={{ flex: 1, padding: '13px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '12px', fontWeight: 700, fontSize: '14px', color: 'var(--text3)', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif' }}>
+                Skip
+              </button>
+              <button onClick={submitRating} disabled={ratingLoading || starRating === 0}
+                style={{ flex: 2, padding: '13px', background: starRating === 0 ? 'var(--border2)' : 'var(--yellow)', border: 'none', borderRadius: '12px', fontWeight: 800, fontSize: '14px', color: '#0a0a0a', cursor: starRating === 0 ? 'not-allowed' : 'pointer', fontFamily: 'Space Grotesk, sans-serif' }}>
+                {ratingLoading ? '⏳ Submitting…' : '⭐ Submit Rating'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -461,7 +553,15 @@ function ActiveOrderCard({ order, profile, route, mapStyle, MAP_STYLES, showPick
         {order.receiver_confirmed && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '11px 14px', background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', marginTop: '10px' }}>
             <CheckCircle size={15} color="var(--green)" />
-            <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--green)' }}>You confirmed receipt ✓</p>
+            <div>
+              <p style={{ fontSize: '13px', fontWeight: 700, color: 'var(--green)' }}>You confirmed receipt ✓</p>
+              {order.sender_rating > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '3px', marginTop: '4px' }}>
+                  {[1,2,3,4,5].map((s: number) => <Star key={s} size={13} color={s <= order.sender_rating ? '#f5c518' : 'var(--border2)'} fill={s <= order.sender_rating ? '#f5c518' : 'none'} />)}
+                  {order.sender_comment && <span style={{ fontSize: '11px', color: 'var(--text3)', marginLeft: '4px' }}>"{order.sender_comment}"</span>}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -518,7 +618,7 @@ function PaymentSection({ order, profile, payStatus, payingId, onPay }: any) {
 
 
 // ── Food Order Card ───────────────────────────────────────────
-function FoodOrderCard({ order }: { order: any }) {
+function FoodOrderCard({ order, onConfirmFood, confirmingId }: { order: any; onConfirmFood?: (id: string) => void; confirmingId?: string | null }) {
   const statusColors: Record<string, string> = {
     pending:    '#f5c518',
     accepted:   '#3b82f6',
@@ -613,6 +713,27 @@ function FoodOrderCard({ order }: { order: any }) {
             <a href={`tel:${order.drivers.profiles.phone_number}`} style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: '8px', padding: '7px 11px', color: 'var(--blue)', textDecoration: 'none', fontSize: '12px', fontWeight: 700 }}>
               <Phone size={11} /> Call
             </a>
+          </div>
+        )}
+
+        {/* Confirm receipt for food orders */}
+        {(order.status === 'in_transit' || order.status === 'delivered') && !order.receiver_confirmed && (
+          <button onClick={() => onConfirmFood && onConfirmFood(order.id)}
+            style={{ width: '100%', marginTop: '12px', padding: '12px', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '12px', color: 'var(--green)', cursor: 'pointer', fontWeight: 800, fontSize: '13px', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+            <CheckCircle size={15} /> ✅ Confirm I received my order
+          </button>
+        )}
+        {order.receiver_confirmed && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 12px', background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', marginTop: '10px' }}>
+            <CheckCircle size={14} color="var(--green)" />
+            <div>
+              <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--green)' }}>You confirmed receipt ✓</p>
+              {order.driver_rating > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '3px', marginTop: '3px' }}>
+                  {[1,2,3,4,5].map((s: number) => <Star key={s} size={12} color={s <= order.driver_rating ? '#f5c518' : 'var(--border2)'} fill={s <= order.driver_rating ? '#f5c518' : 'none'} />)}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
