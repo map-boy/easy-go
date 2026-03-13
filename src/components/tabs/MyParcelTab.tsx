@@ -101,7 +101,7 @@ export function MyParcelTab() {
         .order('created_at', { ascending: false }),
       supabase
         .from('food_orders')
-        .select(`*, drivers:driver_id(plate_number, user_id, latitude, longitude, profiles:user_id(full_name, phone_number))`)
+        .select('*')
         .eq('user_id', profile.id)
         .order('created_at', { ascending: false }),
     ]);
@@ -115,16 +115,39 @@ export function MyParcelTab() {
     if (!rawData.length) { setOrders([]); setLoading(false); return; }
 
     const enriched = await Promise.all(rawData.map(async (o: any) => {
-      const { data: sp } = await supabase.from('profiles').select('latitude,longitude').eq('id', o.sender_id).maybeSingle();
-      const { data: rp } = profile.id ? await supabase.from('profiles').select('latitude,longitude').eq('id', profile.id).maybeSingle() : { data: null };
+      // For regular orders: sender position from their profile
+      const senderProfileId = o._type === 'food' ? null : o.sender_id;
+      const { data: sp } = senderProfileId
+        ? await supabase.from('profiles').select('latitude,longitude').eq('id', senderProfileId).maybeSingle()
+        : { data: null };
+      // Receiver is always current user
+      const { data: rp } = await supabase.from('profiles').select('latitude,longitude').eq('id', profile.id).maybeSingle();
+
+      // Driver info — food orders use driver_user_id, regular orders use drivers join
+      let driverLat = null, driverLng = null, driverName = null, driverPhone = null, driverPlate = null;
+      if (o._type === 'food') {
+        if (o.driver_user_id) {
+          const { data: dp } = await supabase.from('profiles').select('latitude,longitude,full_name,phone_number').eq('id', o.driver_user_id).maybeSingle();
+          driverLat = dp?.latitude; driverLng = dp?.longitude;
+          driverName = dp?.full_name; driverPhone = dp?.phone_number;
+          driverPlate = o.driver_plate;
+        }
+      } else {
+        driverLat   = o.drivers?.latitude;
+        driverLng   = o.drivers?.longitude;
+        driverName  = o.drivers?.profiles?.full_name;
+        driverPhone = o.drivers?.profiles?.phone_number;
+        driverPlate = o.drivers?.plate_number;
+      }
+
       return {
         ...o,
         sender_lat:   sp?.latitude,   sender_lng:   sp?.longitude,
         receiver_lat: rp?.latitude,   receiver_lng: rp?.longitude,
-        driver_lat:   o.drivers?.latitude,   driver_lng:   o.drivers?.longitude,
-        driver_name:  o.drivers?.profiles?.full_name,
-        driver_phone: o.drivers?.profiles?.phone_number,
-        driver_plate: o.drivers?.plate_number,
+        driver_lat:   driverLat,      driver_lng:   driverLng,
+        driver_name:  driverName,
+        driver_phone: driverPhone,
+        driver_plate: driverPlate,
       };
     }));
 

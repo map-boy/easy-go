@@ -18,7 +18,8 @@ export function ProfileTab() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // fold states
-  const [showMyInfo,  setShowMyInfo]  = useState(false);
+  const [showMyInfo,    setShowMyInfo]    = useState(false);
+  const [showWalletTxs, setShowWalletTxs] = useState(false);
   const [showRole,    setShowRole]    = useState(false);
   const [showAbout,   setShowAbout]   = useState(false);
 
@@ -185,87 +186,69 @@ export function ProfileTab() {
         </div>
       )}
 
-      {/* ── AVATAR + NAME (always visible) ── */}
-      <div className="card" style={{ textAlign: 'center' }}>
-        <div style={{ position: 'relative', display: 'inline-block', marginBottom: '10px' }}>
-          {(photoPreview || (profile as any).profile_picture) ? (
-            <img src={photoPreview || (profile as any).profile_picture} alt="Profile"
-              style={{ width: '84px', height: '84px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--yellow)', boxShadow: '0 0 20px rgba(245,197,24,0.2)' }} />
-          ) : (
-            <div style={{ width: '84px', height: '84px', borderRadius: '50%', background: 'rgba(245,197,24,0.1)', border: '2px solid rgba(245,197,24,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <User size={34} color="var(--yellow)" />
-            </div>
-          )}
-          <button onClick={() => fileInputRef.current?.click()}
-            style={{ position: 'absolute', bottom: 0, right: 0, width: '28px', height: '28px', borderRadius: '50%', background: 'var(--yellow)', border: '2px solid var(--card)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
-            <Camera size={13} color={isDark ? '#0a0a0a' : '#fff'} />
-          </button>
-          <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handlePhotoChange} />
-        </div>
-        <p style={{ fontWeight: 800, fontSize: '17px', color: 'var(--text)', marginBottom: '4px' }}>{profile.full_name || '—'}</p>
-        <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '8px' }}>{profile.phone_number}</p>
-        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: (profile as any).is_active ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)', border: `1px solid ${(profile as any).is_active ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`, borderRadius: '20px', padding: '5px 14px' }}>
-          {(profile as any).is_active ? <CheckCircle size={12} color="var(--green)" /> : <XCircle size={12} color="var(--red)" />}
-          <span style={{ fontSize: '12px', fontWeight: 700, color: (profile as any).is_active ? 'var(--green)' : 'var(--red)' }}>
-            {(profile as any).is_active ? 'Active Member' : 'Inactive Member'}
-          </span>
-        </div>
-      </div>
-
       {/* ── WALLET ── */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ background: 'linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%)', padding: '20px 18px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Wallet size={16} color="#f5c518" />
-              <span style={{ fontWeight: 800, fontSize: '14px', color: '#fff', fontFamily: 'Space Grotesk, sans-serif' }}>My Wallet</span>
-            </div>
-            <button onClick={loadWallet} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.4)', display: 'flex', padding: '4px' }}>
-              <RefreshCw size={13} />
+      <div style={{ background: 'linear-gradient(135deg, #0a0a0a 0%, #111c2e 100%)', border: '1px solid rgba(245,197,24,0.2)', borderRadius: '14px', padding: '16px' }}>
+        {/* Header row */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Wallet size={15} color="#f5c518" />
+            <span style={{ fontWeight: 700, fontSize: '13px', color: '#fff', fontFamily: 'Space Grotesk, sans-serif' }}>My Wallet</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button onClick={loadWallet} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.35)', display: 'flex', padding: '4px' }}>
+              <RefreshCw size={12} />
+            </button>
+            <button onClick={() => setShowWalletTxs(v => !v)} style={{ background: 'rgba(245,197,24,0.1)', border: '1px solid rgba(245,197,24,0.25)', borderRadius: '8px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 700, color: '#f5c518', fontFamily: 'Space Grotesk, sans-serif' }}>
+              {showWalletTxs ? 'Hide' : 'Show'}
             </button>
           </div>
-          {walletLoading ? (
-            <div style={{ height: '36px', background: 'rgba(255,255,255,0.07)', borderRadius: '8px', width: '140px' }} />
-          ) : (
-            <p style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: '32px', fontWeight: 900, color: '#fff', letterSpacing: '-.02em' }}>
-              {walletBalance.toLocaleString()} <span style={{ fontSize: '14px', fontWeight: 600, color: 'rgba(255,255,255,0.5)' }}>RWF</span>
-            </p>
-          )}
-          <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.35)', marginTop: '4px' }}>Available balance</p>
-          <button onClick={() => { setShowTopup(true); setTopupStep('form'); setTopupAmount(''); setTopupError(''); }}
-            style={{ marginTop: '14px', width: '100%', padding: '11px', background: '#f5c518', border: 'none', borderRadius: '10px', fontWeight: 800, fontSize: '13px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-            <Plus size={14} /> Top Up Wallet
-          </button>
         </div>
-        <div style={{ padding: '14px 18px' }}>
-          <p style={{ fontWeight: 700, fontSize: '12px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '10px' }}>Recent Transactions</p>
-          {walletLoading ? (
-            [1,2,3].map(i => <div key={i} style={{ height: '48px', background: 'var(--bg3)', borderRadius: '8px', marginBottom: '6px' }} />)
-          ) : walletTxs.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}>
-              <p style={{ fontSize: '24px', marginBottom: '6px' }}>💳</p>
-              <p style={{ fontSize: '12px', color: 'var(--text3)' }}>No transactions yet</p>
-            </div>
-          ) : walletTxs.map(tx => (
-            <div key={tx.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 0', borderBottom: '1px solid var(--border)' }}>
-              <div style={{ width: '34px', height: '34px', borderRadius: '10px', background: tx.type === 'payment' ? 'rgba(245,158,11,0.1)' : 'rgba(34,197,94,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                {tx.type === 'payment' ? <ArrowUpRight size={14} color="#f59e0b" /> : <ArrowDownLeft size={14} color="#22c55e" />}
+
+        {/* Balance */}
+        {walletLoading ? (
+          <div style={{ height: '38px', background: 'rgba(255,255,255,0.07)', borderRadius: '8px', width: '150px', marginBottom: '2px' }} />
+        ) : (
+          <p style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: '30px', fontWeight: 900, color: '#fff', letterSpacing: '-.02em', marginBottom: '2px' }}>
+            {walletBalance.toLocaleString()} <span style={{ fontSize: '13px', fontWeight: 600, color: 'rgba(255,255,255,0.4)' }}>RWF</span>
+          </p>
+        )}
+        <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', marginBottom: '14px' }}>Available balance</p>
+
+        {/* Top up button */}
+        <button onClick={() => { setShowTopup(true); setTopupStep('form'); setTopupAmount(''); setTopupError(''); }}
+          style={{ width: '100%', padding: '11px', background: '#f5c518', border: 'none', borderRadius: '10px', fontWeight: 800, fontSize: '13px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+          <Plus size={14} /> Top Up Wallet
+        </button>
+
+        {/* Folded transactions */}
+        {showWalletTxs && (
+          <div style={{ marginTop: '14px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '14px' }}>
+            <p style={{ fontSize: '11px', fontWeight: 700, color: 'rgba(255,255,255,0.35)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '10px' }}>Recent Transactions</p>
+            {walletLoading ? (
+              [1,2,3].map(i => <div key={i} style={{ height: '40px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', marginBottom: '6px' }} />)
+            ) : walletTxs.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '16px 0' }}>
+                <p style={{ fontSize: '22px', marginBottom: '6px' }}>💳</p>
+                <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.3)' }}>No transactions yet</p>
               </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description}</p>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '2px' }}>
-                  {tx.status === 'completed' && <CheckCircle size={10} color="#22c55e" />}
-                  {tx.status === 'pending'   && <Clock       size={10} color="#f59e0b" />}
-                  {tx.status === 'failed'    && <XCircle     size={10} color="#ef4444" />}
-                  <p style={{ fontSize: '10px', color: 'var(--text3)' }}>{new Date(tx.created_at).toLocaleString()}</p>
+            ) : walletTxs.map(tx => (
+              <div key={tx.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ flex: 1, minWidth: 0, marginRight: '8px' }}>
+                  <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.55)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tx.description}</p>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '2px' }}>
+                    {tx.status === 'completed' && <CheckCircle size={9} color="#22c55e" />}
+                    {tx.status === 'pending'   && <Clock       size={9} color="#f59e0b" />}
+                    {tx.status === 'failed'    && <XCircle     size={9} color="#ef4444" />}
+                    <p style={{ fontSize: '10px', color: 'rgba(255,255,255,0.25)' }}>{new Date(tx.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</p>
+                  </div>
                 </div>
+                <p style={{ fontSize: '13px', fontWeight: 800, color: tx.type === 'payment' ? '#ef4444' : '#22c55e', whiteSpace: 'nowrap', fontFamily: 'Space Grotesk, sans-serif' }}>
+                  {tx.type === 'payment' ? '−' : '+'}{tx.amount.toLocaleString()}
+                </p>
               </div>
-              <p style={{ fontWeight: 800, fontSize: '13px', color: tx.type === 'payment' ? '#f59e0b' : '#22c55e', whiteSpace: 'nowrap', fontFamily: 'Space Grotesk, sans-serif' }}>
-                {tx.type === 'payment' ? '−' : '+'}{tx.amount.toLocaleString()} RWF
-              </p>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* ── MY INFORMATION (folded) ── */}

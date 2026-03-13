@@ -275,8 +275,6 @@ export function SenderOrderView({ onPriceRequest }: {
   const [priceReady,     setPriceReady]     = useState(false);
   const [breakdown,      setBreakdown]      = useState<any>(null);
   const [routeKm,        setRouteKm]        = useState<{ d2s: number; s2r: number } | null>(null);
-  type PayStep = 'requesting'|'pending'|'paid'|'failed'|'timeout'|'error'|null;
-  const [paymentStep, setPaymentStep] = useState<PayStep>(null);
   const [loading,     setLoading]     = useState(false);
   const [success,     setSuccess]     = useState(false);
   const [isFragile,      setIsFragile]      = useState(false);
@@ -446,6 +444,12 @@ export function SenderOrderView({ onPriceRequest }: {
     e.preventDefault();
     if (!profile || !priceReady) return;
     if (receiverHasApp === false && !validateManualFields()) return;
+
+    if (walletBalance < predictedPrice) {
+      alert(`Insufficient wallet balance. You have ${walletBalance.toLocaleString()} RWF but need ${predictedPrice.toLocaleString()} RWF. Please top up your wallet.`);
+      return;
+    }
+
     setLoading(true);
     try {
       const isNight          = new Date().getHours() >= 18 || new Date().getHours() < 6;
@@ -455,131 +459,83 @@ export function SenderOrderView({ onPriceRequest }: {
       const receiverDistrict = receiverHasApp ? selectedReceiver.district     : manualDistrict;
       const receiverId       = receiverHasApp ? selectedReceiver.id           : null;
 
-      // ── CHANGED: Insert directly as 'pending' + paid — bypasses payment barrier ──
-      // ── WALLET PAYMENT PATH ──────────────────────────────────────────────────
-      if (useWallet) {
-        if (walletBalance < predictedPrice) {
-          alert('Insufficient wallet balance. Please top up your wallet first.');
-          setLoading(false);
-          return;
-        }
-        // Deduct from wallet immediately
-        await supabase.rpc('increment_wallet_balance', { uid: profile.id, delta: -predictedPrice });
-        await supabase.from('wallet_transactions').insert({
-          user_id: profile.id, type: 'payment', amount: predictedPrice,
-          status: 'completed', description: `Delivery payment — ${receiverName}`,
-        });
-        const { data: newOrder, error: wErr } = await supabase.from('orders').insert({
-          sender_id: profile.id, sender_name: (profile as any).full_name,
-          sender_number: (profile as any).phone_number,
-          sender_location: (profile as any).location, sender_district: (profile as any).district,
-          receiver_id: receiverId, receiver_name: receiverName, receiver_number: receiverNumber,
-          receiver_location: receiverLocation, receiver_district: receiverDistrict,
-          package_size: packageSize, package_weight: packageWeight,
-          predicted_price: predictedPrice, payment_method: 'Wallet',
-          delivery_note: emergencyNote, is_night_delivery: isNight,
-          is_fragile: isFragile, delivery_speed: deliverySpeed,
-          weather_condition: weatherCond, road_condition: roadCond,
-          payer_name: (profile as any).full_name,
-          payer_number: (profile as any).phone_number,
-          status: 'pending', sender_paid: true, payment_status: 'paid',
-        }).select().single();
-        if (wErr) throw wErr;
-        if (receiverId) {
-          await supabase.from('notifications').insert({
-            user_id: receiverId, title: '📦 Package coming your way!',
-            body: `${(profile as any).full_name} is sending you a package.`,
-            type: 'new_order', order_id: newOrder.id, read: false,
-          });
-        }
-        setLoading(false);
-        setSuccess(true);
-        setTimeout(() => setSuccess(false), 5000);
-        return;
+      // Deduct from wallet
+      const { error: walletErr } = await supabase.rpc('increment_wallet_balance', {
+        uid: profile.id, delta: -predictedPrice,
+      });
+      if (walletErr) throw new Error('Wallet deduction failed: ' + walletErr.message);
+
+      // Log wallet transaction (non-blocking — won't fail the order if table missing)
+      supabase.from('wallet_transactions').insert({
+        user_id: profile.id, type: 'debit', amount: predictedPrice,
+        status: 'completed', description: `Delivery → ${receiverName}`,
+      }).then(() => {}).catch(() => {});
+
+      // Place order as pending + paid immediately
+      const { data: newOrder, error: orderErr } = await supabase.from('orders').insert({
+        sender_id:        profile.id,
+        sender_name:      (profile as any).full_name,
+        sender_number:    (profile as any).phone_number,
+        sender_location:  (profile as any).location,
+        sender_district:  (profile as any).district,
+        receiver_id:      receiverId,
+        receiver_name:    receiverName,
+        receiver_number:  receiverNumber,
+        receiver_location: receiverLocation,
+        receiver_district: receiverDistrict,
+        package_size:     packageSize,
+        package_weight:   packageWeight,
+        predicted_price:  predictedPrice,
+        payment_method:   'Wallet',
+        delivery_note:    emergencyNote,
+        is_night_delivery: isNight,
+        is_fragile:       isFragile,
+        delivery_speed:   deliverySpeed,
+        weather_condition: weatherCond,
+        road_condition:   roadCond,
+        payer_name:       (profile as any).full_name,
+        payer_number:     (profile as any).phone_number,
+        status:           'pending',
+        sender_paid:      true,
+        payment_status:   'paid',
+      }).select().single();
+      if (orderErr) {
+        // Refund wallet if order failed
+        await supabase.rpc('increment_wallet_balance', { uid: profile.id, delta: predictedPrice });
+        throw new Error('Order failed: ' + orderErr.message);
       }
 
-      const { data: newOrder, error } = await supabase.from('orders').insert({
-        sender_id: profile.id, sender_name: (profile as any).full_name,
-        sender_number: (profile as any).phone_number,
-        sender_location: (profile as any).location, sender_district: (profile as any).district,
-        receiver_id: receiverId, receiver_name: receiverName, receiver_number: receiverNumber,
-        receiver_location: receiverLocation, receiver_district: receiverDistrict,
-        package_size: packageSize, package_weight: packageWeight,
-        predicted_price: predictedPrice, payment_method: paymentMethod,
-        delivery_note: emergencyNote, is_night_delivery: isNight,
-        is_fragile: isFragile, delivery_speed: deliverySpeed,
-        weather_condition: weatherCond, road_condition: roadCond,
-        payer_name:    payerName,
-        payer_number:  `${payerPhone.code}${payerPhone.number}`,
-        status:         'awaiting_payment',
-        sender_paid:    false,
-        payment_status: 'awaiting_payment',
-      }).select().single();
-      if (error) throw error;
-
-      setPaymentStep('requesting');
-      const NOOR_URL = (import.meta as any).env?.VITE_NOOR_URL || 'http://localhost:3001';
-      const NOOR_KEY = (import.meta as any).env?.VITE_NOOR_API_KEY || '';
-
-      const noorRes = await fetch(`${NOOR_URL}/api/payments/request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': NOOR_KEY },
-        body: JSON.stringify({
-          orderId:     newOrder.id,
-          amount:      predictedPrice,
-          phoneNumber: `${payerPhone.code}${payerPhone.number}`,
-          payerName,
-        }),
-      });
-      const noorData = await noorRes.json();
-      if (!noorRes.ok || !noorData.transactionId) throw new Error(noorData.error || 'Payment request failed');
-
-      setPaymentStep('pending');
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        attempts++;
-        if (attempts > 24) {
-          clearInterval(poll);
-          setPaymentStep('timeout');
-          return;
-        }
-        try {
-          const chkRes = await fetch(`${NOOR_URL}/api/payments/status/${noorData.transactionId}`, {
-            headers: { 'x-api-key': NOOR_KEY },
-          });
-          const chk = await chkRes.json();
-          if (chk.status === 'SUCCESSFUL') {
-            clearInterval(poll);
-            setPaymentStep('paid');
-          } else if (chk.status === 'FAILED') {
-            clearInterval(poll);
-            setPaymentStep('failed');
-          }
-        } catch { /* keep polling */ }
-      }, 5000);
-      return; // wait for polling to finish
-      setLoading(false);
-      setSuccess(true);
+      // Notify receiver if they have the app
       if (receiverId) {
         await supabase.from('notifications').insert({
-          user_id: receiverId, title: '📦 Package coming your way!',
-          body: `${(profile as any).full_name} is sending you a package.`,
-          type: 'new_order', order_id: newOrder.id, read: false,
+          user_id: receiverId,
+          title:   '📦 Package coming your way!',
+          body:    `${(profile as any).full_name} is sending you a package.`,
+          type:    'new_order',
+          order_id: newOrder.id,
+          read:    false,
         });
       }
+
+      // Refresh wallet balance
+      const { data: wd } = await supabase.from('profiles').select('wallet_balance').eq('id', profile.id).single();
+      setWalletBalance(wd?.wallet_balance ?? walletBalance - predictedPrice);
+
+      // Reset form
       setReceiverHasApp(null); setSelectedReceiver(null); setSearchName('');
       setManualName(''); setManualPhone({ code: '+250', number: '' });
       setManualDistrict(''); setManualLocation(''); setManualLocCoords(null);
       setPackageWeight(''); setEmergencyNote('');
-      setPayerName(''); setPayerPhone({ code: '+250', number: '' }); setPayerPhoneErr(null);
       setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null);
-      setTimeout(() => { setSuccess(false); setPaymentStep(null); }, 5000);
+
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 6000);
 
     } catch (err: any) {
       console.error(err);
-      setPaymentStep('error');
-      setLoading(false);
       alert('Error: ' + err.message);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -855,73 +811,14 @@ export function SenderOrderView({ onPriceRequest }: {
         </div>
       )}
 
-      {/* ── PAYMENT STATUS UI ── */}
-      {paymentStep === 'requesting' && (
-        <div style={{ background: 'rgba(255,214,0,0.08)', border: '1px solid rgba(255,214,0,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
-          <div className="spinner" style={{ width: '32px', height: '32px', margin: '0 auto 12px' }} />
-          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text)' }}>⏳ Connecting to MTN MoMo…</p>
-          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Sending payment request to your phone</p>
-        </div>
-      )}
-
-      {paymentStep === 'pending' && (
-        <div style={{ background: 'rgba(255,214,0,0.08)', border: '1px solid rgba(255,214,0,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
-          <p style={{ fontSize: '32px', marginBottom: '8px' }}>📱</p>
-          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text)' }}>Check your phone!</p>
-          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Approve the MTN MoMo payment prompt on your phone</p>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', marginTop: '12px' }}>
-            <div className="spinner" style={{ width: '14px', height: '14px' }} />
-            <span style={{ fontSize: '11px', color: 'var(--text3)' }}>Waiting for approval…</span>
-          </div>
-        </div>
-      )}
-
-      {paymentStep === 'paid' && (
-        <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
-          <p style={{ fontSize: '32px', marginBottom: '8px' }}>✅</p>
-          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--green)' }}>Payment successful!</p>
-          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Your order is now visible to drivers 🚀</p>
-        </div>
-      )}
-
-      {paymentStep === 'failed' && (
-        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
-          <p style={{ fontSize: '32px', marginBottom: '8px' }}>❌</p>
-          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--red)' }}>Payment failed</p>
-          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Please try again</p>
-          <button type="button" onClick={() => setPaymentStep(null)} style={{ marginTop: '12px', padding: '8px 20px', borderRadius: '8px', background: 'var(--yellow)', border: 'none', fontWeight: 700, cursor: 'pointer', fontSize: '13px' }}>Try Again</button>
-        </div>
-      )}
-
-      {paymentStep === 'timeout' && (
-        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
-          <p style={{ fontSize: '32px', marginBottom: '8px' }}>⏰</p>
-          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--red)' }}>Payment timed out</p>
-          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>You did not approve in time. Please try again.</p>
-          <button type="button" onClick={() => setPaymentStep(null)} style={{ marginTop: '12px', padding: '8px 20px', borderRadius: '8px', background: 'var(--yellow)', border: 'none', fontWeight: 700, cursor: 'pointer', fontSize: '13px' }}>Try Again</button>
-        </div>
-      )}
-
-      {paymentStep === 'error' && (
-        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: '12px', padding: '20px', textAlign: 'center' }}>
-          <p style={{ fontSize: '32px', marginBottom: '8px' }}>⚠️</p>
-          <p style={{ fontWeight: 700, fontSize: '15px', color: 'var(--red)' }}>Something went wrong</p>
-          <p style={{ fontSize: '12px', color: 'var(--text3)', marginTop: '6px' }}>Please try again</p>
-          <button type="button" onClick={() => setPaymentStep(null)} style={{ marginTop: '12px', padding: '8px 20px', borderRadius: '8px', background: 'var(--yellow)', border: 'none', fontWeight: 700, cursor: 'pointer', fontSize: '13px' }}>Try Again</button>
-        </div>
-      )}
-
-      {/* ── SUBMIT — only show when no payment in progress ── */}
-      {!paymentStep && (
-        <button type="submit" className="btn-yellow"
-          disabled={loading || priceLoading || !priceReady || walletBalance < predictedPrice}
-          style={{ fontSize: '15px', padding: '13px' }}>
-          {loading          ? '⏳ Placing order…'                          :
-           !priceReady      ? 'Fill all fields first'                       :
-           walletBalance < predictedPrice ? `⚠️ Top up wallet — need ${predictedPrice.toLocaleString()} RWF` :
-           `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF from Wallet`}
-        </button>
-      )}
+      <button type="submit" className="btn-yellow"
+        disabled={loading || priceLoading || !priceReady || walletBalance < predictedPrice}
+        style={{ fontSize: '15px', padding: '13px' }}>
+        {loading          ? '⏳ Placing order…' :
+         !priceReady      ? 'Fill all fields first' :
+         walletBalance < predictedPrice ? `⚠️ Top up wallet — need ${predictedPrice.toLocaleString()} RWF` :
+         `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF from Wallet`}
+      </button>
 
     </form>
   );

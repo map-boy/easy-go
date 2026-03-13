@@ -155,6 +155,8 @@ export function TrackTab() {
   const [activeTab,     setActiveTab]     = useState<'map'|'deliveries'|'drivers'|'stats'>('map');
   const [showFilters,   setShowFilters]   = useState(false);
   const [drivers,       setDrivers]       = useState<any[]>([]);
+  const [confirmingId,  setConfirmingId]  = useState<string | null>(null);
+  const [confirmDoneId, setConfirmDoneId] = useState<string | null>(null);
 
   // Routes for active order
   const [routeM2S, setRouteM2S] = useState<any>(null); // motari → sender
@@ -348,6 +350,45 @@ export function TrackTab() {
       }, 5000);
 
     } catch { setPayStatus(s => ({ ...s, [orderId]: 'failed' })); setPayingId(null); }
+  }
+
+
+  // ── Confirm delivery ─────────────────────────────────────────────────────
+  async function confirmDelivery(orderId: string) {
+    if (!profile?.id) return;
+    setConfirmingId(orderId);
+    try {
+      const { data: ord } = await supabase
+        .from('orders')
+        .select('driver_id, predicted_price')
+        .eq('id', orderId)
+        .single();
+
+      await supabase.from('orders').update({
+        sender_confirmed: true,
+        status:           'delivered',
+        updated_at:       new Date().toISOString(),
+      }).eq('id', orderId);
+
+      if (ord?.driver_id && ord?.predicted_price) {
+        const pay70 = Math.round(ord.predicted_price * 0.7);
+        const { data: drv } = await supabase.from('drivers').select('user_id').eq('id', ord.driver_id).single();
+        if (drv?.user_id) {
+          await supabase.rpc('increment_wallet_balance', { uid: drv.user_id, delta: pay70 });
+          await supabase.from('wallet_transactions').insert({
+            user_id:     drv.user_id,
+            type:        'topup',
+            amount:      pay70,
+            status:      'completed',
+            description: `Delivery earnings 70% — order #${orderId.slice(0, 8)}`,
+          });
+        }
+      }
+      setConfirmDoneId(orderId);
+      loadOrders();
+    } finally {
+      setConfirmingId(null);
+    }
   }
 
   // ── Load drivers ──────────────────────────────────────────────────────────
@@ -627,6 +668,51 @@ export function TrackTab() {
                   </div>
                 )}
 
+                {/* ── SENDER CONFIRM DELIVERY ── */}
+                {!isMotari && activeOrder.sender_id === profile?.id &&
+                  ['in_transit', 'delivered'].includes(activeOrder.status) &&
+                  !activeOrder.sender_confirmed &&
+                  confirmDoneId !== activeOrder.id && (
+                  <div style={{ background: 'rgba(139,92,246,0.07)', border: '2px solid rgba(139,92,246,0.3)', borderRadius: '12px', padding: '14px', marginTop: '4px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                      <div>
+                        <p style={{ fontWeight: 800, fontSize: '14px', color: '#8b5cf6', marginBottom: '2px' }}>
+                          {activeOrder.status === 'in_transit' ? '🚀 Package in Transit' : '📬 Mark as Delivered'}
+                        </p>
+                        <p style={{ fontSize: '11px', color: 'var(--text3)' }}>
+                          Confirm the receiver got the package to release driver payment
+                        </p>
+                      </div>
+                      <p style={{ fontWeight: 800, fontSize: '15px', color: 'var(--yellow)', marginLeft: '10px', flexShrink: 0 }}>
+                        {Math.round((activeOrder.predicted_price || 0) * 0.7).toLocaleString()} RWF to driver
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => confirmDelivery(activeOrder.id)}
+                      disabled={confirmingId === activeOrder.id}
+                      style={{ width: '100%', padding: '13px', background: '#8b5cf6', border: 'none', borderRadius: '10px', fontWeight: 800, fontSize: '14px', color: '#fff', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', opacity: confirmingId === activeOrder.id ? 0.7 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                    >
+                      {confirmingId === activeOrder.id ? '⏳ Confirming…' : '✅ Confirm Receiver Got the Package'}
+                    </button>
+                    <p style={{ fontSize: '10px', color: 'var(--text3)', textAlign: 'center', marginTop: '7px' }}>
+                      70% ({Math.round((activeOrder.predicted_price || 0) * 0.7).toLocaleString()} RWF) goes to driver · 30% to Easy GO
+                    </p>
+                  </div>
+                )}
+
+                {/* Confirmed success flash */}
+                {confirmDoneId === activeOrder.id && (
+                  <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '12px', padding: '14px', display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
+                    <span style={{ fontSize: '22px' }}>🎉</span>
+                    <div>
+                      <p style={{ fontWeight: 800, fontSize: '14px', color: 'var(--green)' }}>Delivery confirmed!</p>
+                      <p style={{ fontSize: '12px', color: 'var(--text3)' }}>
+                        Driver received {Math.round((activeOrder.predicted_price || 0) * 0.7).toLocaleString()} RWF · Thank you for using Easy GO!
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {!activeOrder.sender_paid && activeOrder.sender_id === profile?.id && ['accepted','awaiting_payment'].includes(activeOrder.status) && (
                   <div>
                     {payStatus[activeOrder.id] === 'pending' || payStatus[activeOrder.id] === 'requesting' ? (
@@ -743,6 +829,31 @@ export function TrackTab() {
                         ))}
                       </div>
                     </div>
+
+                    {/* Sender confirm delivery in orders list */}
+                    {!isMotari && order.sender_id === profile?.id &&
+                      ['in_transit', 'delivered'].includes(order.status) &&
+                      !order.sender_confirmed &&
+                      confirmDoneId !== order.id && (
+                      <div style={{ background: 'rgba(139,92,246,0.07)', border: '1px solid rgba(139,92,246,0.25)', borderRadius: '10px', padding: '12px', marginBottom: '4px' }}>
+                        <p style={{ fontSize: '12px', color: '#8b5cf6', fontWeight: 700, marginBottom: '8px' }}>
+                          📦 Confirm receiver got the package → release 70% to driver
+                        </p>
+                        <button
+                          onClick={() => confirmDelivery(order.id)}
+                          disabled={confirmingId === order.id}
+                          style={{ width: '100%', padding: '11px', background: '#8b5cf6', border: 'none', borderRadius: '9px', fontWeight: 800, fontSize: '13px', color: '#fff', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', opacity: confirmingId === order.id ? 0.7 : 1 }}
+                        >
+                          {confirmingId === order.id ? '⏳ Confirming…' : '✅ Confirm Delivery'}
+                        </button>
+                      </div>
+                    )}
+                    {confirmDoneId === order.id && (
+                      <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', padding: '10px', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>🎉</span>
+                        <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--green)' }}>Confirmed! Driver received {Math.round((order.predicted_price || 0) * 0.7).toLocaleString()} RWF</p>
+                      </div>
+                    )}
 
                     {/* Contact buttons */}
                     <div style={{ display: 'flex', gap: '8px' }}>
