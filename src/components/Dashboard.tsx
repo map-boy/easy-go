@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { registerPush } from '../lib/pushNotifications';
+import { supabase } from '../lib/supabase';
 import { HomeTab }        from './tabs/HomeTab';
 import { SenderOrderTab } from './tabs/SenderOrderTab';
 import { TrackTab }       from './tabs/TrackTab';
 import { ProfileTab }     from './tabs/ProfileTab';
 import { DriverTab }      from './tabs/DriverTab';
-import { DriverShopTab } from './tabs/DriverShopTab';
+import { DriverOrderView } from './tabs/DriverOrderView';
 import { ReceiverTab }    from './tabs/ReceiverTab';
 import { MyParcelTab }    from './tabs/MyParcelTab';
 import { useAuth }        from '../contexts/AuthContext';
@@ -34,6 +36,13 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
   const [activeTab, setActiveTab] = useState<TabType>('order');
   const LOCKED_TABS_DEMO: TabType[] = ['order', 'profile'];
   const [showDemoLock, setShowDemoLock] = useState(false);
+
+  // Register push notifications when user logs in
+  useEffect(() => {
+    if (profile?.id) {
+      registerPush(profile.id, supabase).catch(() => {});
+    }
+  }, [profile?.id]);
 
   const isDriver   = profile?.user_category === 'motari'   || profile?.role === 'driver';
   const isReceiver = profile?.user_category === 'receiver' || profile?.role === 'receiver';
@@ -76,7 +85,7 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
       if (isDriver)   return <DriverTab />;
       return <SenderOrderTab />;
     }
-    if (activeTab === 'shop') return <DriverShopTab />;
+    if (activeTab === 'shop') return <DriverOrderView />;
     if (activeTab === 'home') return <HomeTab />;
     return null;
   }

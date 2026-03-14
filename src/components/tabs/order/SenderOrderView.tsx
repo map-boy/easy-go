@@ -9,11 +9,10 @@ import {
   Package, DollarSign, AlertCircle, CloudRain,
   CheckCircle, User, Search, X, MapPin, ChevronDown,
 } from 'lucide-react';
-import { supabase } from '../../../lib/supabase';
+import { supabase } from '../../lib/supabase';
 import { Star } from 'lucide-react';
-import { useAuth } from '../../../contexts/AuthContext';
-import { predictPrice, isRushHour, haversineKm } from '../../../lib/pricePredictor';
-import { offlinePrice, findZone, isOfflineRushHour } from '../../../lib/kigaliPricing';
+import { useAuth } from '../../contexts/AuthContext';
+import { predictPrice, isRushHour, haversineKm } from '../../lib/pricePredictor';
 
 const RWANDA_DISTRICTS = [
   'Gasabo','Kicukiro','Nyarugenge',
@@ -271,12 +270,9 @@ export function SenderOrderView({ onPriceRequest }: {
   const [roadCond,        setRoadCond]        = useState<'good'|'moderate'|'poor'>('good');
   const [conditionsReady, setConditionsReady] = useState(false);
   const [emergencyNote, setEmergencyNote] = useState('');
-  const offlinePriceCeilingRef = useRef<number>(0);  // GPS price is always capped to this
   const [predictedPrice, setPredictedPrice] = useState(0);
   const [priceLoading,   setPriceLoading]   = useState(false);
   const [priceReady,     setPriceReady]     = useState(false);
-  const [priceSource,    setPriceSource]    = useState<'gps'|'offline'|null>(null);
-  const [offlineZones,   setOfflineZones]   = useState<{from:string;to:string;confidence:string}|null>(null);
   const [breakdown,      setBreakdown]      = useState<any>(null);
   const [routeKm,        setRouteKm]        = useState<{ d2s: number; s2r: number } | null>(null);
   const [loading,     setLoading]     = useState(false);
@@ -365,139 +361,52 @@ export function SenderOrderView({ onPriceRequest }: {
 
   const allFilled = receiverReady && !!packageWeight;
 
-  // ── EARLY OFFLINE PREVIEW: fires as soon as receiver location is typed ──────
-  // Gives instant price even before all fields are filled
-  // Combine location + district for best zone matching
-  const receiverLocText = receiverHasApp
-    ? [selectedReceiver?.location, selectedReceiver?.district].filter(Boolean).join(' ')
-    : manualLocation;
-  const senderLocText   = (profile as any)?.location || '';
-
-  useEffect(() => {
-    if (!receiverLocText || !senderLocText) return;
-    const result = offlinePrice({
-      senderLocation:   senderLocText,
-      receiverLocation: receiverLocText,
-      packageSize:      packageSize as any,
-      isRushHour:       isOfflineRushHour(),
-      isRaining:        weatherCond === 'rain',
-      poorRoads:        roadCond === 'poor',
-      isRapid:          deliverySpeed === 'rapid',
-    });
-    if (result) {
-      offlinePriceCeilingRef.current = result.priceRwf;  // store ceiling for GPS cap
-      setPredictedPrice(result.priceRwf);
-      setPriceSource('offline');
-      setOfflineZones({ from: result.fromZone, to: result.toZone, confidence: result.confidence });
-      setPriceReady(true);
-    }
-  }, [receiverLocText, senderLocText, packageSize, weatherCond, roadCond, deliverySpeed, selectedReceiver?.id]);
-
-  // ── FULL PRICE (offline instant + GPS race) fires when all fields filled ────
   useEffect(() => {
     if (allFilled) calculatePrice();
-    else if (!receiverLocText) { offlinePriceCeilingRef.current = 0; setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null); setPriceSource(null); setOfflineZones(null); }
+    else { setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null); }
   }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat, packageSize, weatherCond, roadCond, isFragile, deliverySpeed]);
 
   async function calculatePrice() {
-    setPriceLoading(true); setPriceReady(false); setPriceSource(null); setOfflineZones(null);
-
-    const rush   = isRushHour();
-    const badWx  = weatherCond === 'rain';
-    const badRoads = roadCond === 'poor';
-
-    // ── STEP 1: Offline price fires INSTANTLY ────────────────────────────────
-    const senderLoc   = [(profile as any)?.location, (profile as any)?.district].filter(Boolean).join(' ');
-    const receiverLoc = receiverHasApp
-      ? [selectedReceiver?.location, selectedReceiver?.district].filter(Boolean).join(' ')
-      : manualLocation;
-
-    const offlineResult = offlinePrice({
-      senderLocation:   senderLoc,
-      receiverLocation: receiverLoc,
-      packageSize:      packageSize as any,
-      isRushHour:       isOfflineRushHour(),
-      isRaining:        badWx,
-      poorRoads:        badRoads,
-      isRapid:          deliverySpeed === 'rapid',
-    });
-
-    if (offlineResult) {
-      offlinePriceCeilingRef.current = offlineResult.priceRwf;  // update ceiling
-      setPredictedPrice(offlineResult.priceRwf);
-      setPriceSource('offline');
-      setOfflineZones({ from: offlineResult.fromZone, to: offlineResult.toZone, confidence: offlineResult.confidence });
-      setPriceReady(true);
-      setPriceLoading(false);
-    }
-
-    // ── STEP 2: GPS/OSRM race — replaces offline if it wins within 5s ────────
-    const GPS_TIMEOUT = 5000;
-    const gpsStart = Date.now();
-
-    const gpsRace = (async () => {
-      try {
-        const { data: drivers } = await supabase.from('drivers').select('latitude,longitude').eq('is_on_duty', true).eq('is_available', true).not('latitude', 'is', null);
-        let distD2S = 2.0;
-        if (drivers?.length) {
-          const closest = drivers.reduce((best: any, d: any) => {
-            if (!d.latitude || !d.longitude) return best;
-            const km = haversineKm(senderPos[0], senderPos[1], d.latitude, d.longitude);
-            return (!best || km < best.km) ? { ...d, km } : best;
-          }, null);
-          if (closest) distD2S = await getRoadKm([closest.latitude, closest.longitude], senderPos);
-        }
-        let distS2R = offlineResult?.distKm ?? 5.0;
-        if (receiverHasApp && selectedReceiver?.id) {
-          const { data: rp } = await supabase.from('profiles').select('latitude,longitude').eq('id', selectedReceiver.id).maybeSingle();
-          if (rp?.latitude && rp?.longitude) distS2R = await getRoadKm(senderPos, [rp.latitude, rp.longitude]);
-        } else if (!receiverHasApp && manualLocCoords) {
-          distS2R = await getRoadKm(senderPos, [manualLocCoords.lat, manualLocCoords.lng]);
-        }
-
-        // Check if we already timed out
-        if (Date.now() - gpsStart > GPS_TIMEOUT) return;
-
-        const safeD2S = Math.min(Math.max(distD2S, 0.5), 50);
-        const safeS2R = Math.min(Math.max(distS2R, 0.5), 50);
-        setRouteKm({ d2s: safeD2S, s2r: safeS2R });
-
-        let base = 0;
-        if (onPriceRequest) {
-          base = (await onPriceRequest({ dist_to_sender: safeD2S, dist_to_receiver: safeS2R, is_rush_hour: rush ? 1 : 0, bad_weather: badWx ? 1 : 0, bad_roads: badRoads ? 1 : 0 })) ?? 0;
-        } else {
-          const r = predictPrice({ distDriverToSender: safeD2S, distSenderToReceiver: safeS2R, isRushHour: rush, badWeather: badWx, badRoads });
-          base = r.totalFrw;
-          setBreakdown({ distD2S: safeD2S, distS2R: safeS2R, isHarsh: r.breakdown.isHarsh, rate1: r.breakdown.rate1PerKm, rate2: r.breakdown.rate2PerKm });
-        }
-        let final = base;
-        if (packageSize === 'large') final = Math.round(final * 1.3);
-        if (packageSize === 'small') final = Math.round(final * 0.8);
-        if (roadCond === 'moderate') final = Math.round(final * 1.1);
-        if (deliverySpeed === 'rapid') final = Math.round(final * 1.2);
-
-        // GPS won — always cap against the stored offline ceiling
-        // This protects against bad GPS locations inflating the price
-        const gpsFinal = Math.max(final, 1500);
-        const ceiling = offlinePriceCeilingRef.current;
-        const cappedFinal = ceiling > 0 ? Math.min(gpsFinal, ceiling) : gpsFinal;
-        setPredictedPrice(cappedFinal);
-        setPriceSource('gps');
-        setOfflineZones(null);
-        setPriceReady(true);
-      } catch (err) {
-        console.warn('GPS pricing failed, keeping offline estimate', err);
-        // offline result already shown — nothing to do
-        if (!offlineResult) { setPredictedPrice(3500); setPriceReady(true); }
-      } finally {
-        setPriceLoading(false);
+    setPriceLoading(true); setPriceReady(false);
+    try {
+      const { data: drivers } = await supabase.from('drivers').select('latitude,longitude').eq('is_on_duty', true).eq('is_available', true).not('latitude', 'is', null);
+      let distD2S = 2.0;
+      if (drivers?.length) {
+        const closest = drivers.reduce((best: any, d: any) => {
+          if (!d.latitude || !d.longitude) return best;
+          const km = haversineKm(senderPos[0], senderPos[1], d.latitude, d.longitude);
+          return (!best || km < best.km) ? { ...d, km } : best;
+        }, null);
+        if (closest) distD2S = await getRoadKm([closest.latitude, closest.longitude], senderPos);
       }
-    })();
-
-    // Timeout fallback — if GPS takes too long, stop the spinner
-    setTimeout(() => { setPriceLoading(false); }, GPS_TIMEOUT + 500);
-
-    await gpsRace;
+      let distS2R = 5.0;
+      if (receiverHasApp && selectedReceiver?.id) {
+        const { data: rp } = await supabase.from('profiles').select('latitude,longitude').eq('id', selectedReceiver.id).maybeSingle();
+        if (rp?.latitude && rp?.longitude) distS2R = await getRoadKm(senderPos, [rp.latitude, rp.longitude]);
+      } else if (!receiverHasApp && manualLocCoords) {
+        distS2R = await getRoadKm(senderPos, [manualLocCoords.lat, manualLocCoords.lng]);
+      }
+      const rush = isRushHour(); const badWx = weatherCond === 'rain'; const badRoads = roadCond === 'poor';
+      const safeD2S = Math.min(Math.max(distD2S, 0.5), 50);
+      const safeS2R = Math.min(Math.max(distS2R, 0.5), 50);
+      setRouteKm({ d2s: safeD2S, s2r: safeS2R });
+      let base = 0;
+      if (onPriceRequest) {
+        base = (await onPriceRequest({ dist_to_sender: safeD2S, dist_to_receiver: safeS2R, is_rush_hour: rush ? 1 : 0, bad_weather: badWx ? 1 : 0, bad_roads: badRoads ? 1 : 0 })) ?? 0;
+      } else {
+        const r = predictPrice({ distDriverToSender: safeD2S, distSenderToReceiver: safeS2R, isRushHour: rush, badWeather: badWx, badRoads });
+        base = r.totalFrw;
+        setBreakdown({ distD2S: safeD2S, distS2R: safeS2R, isHarsh: r.breakdown.isHarsh, rate1: r.breakdown.rate1PerKm, rate2: r.breakdown.rate2PerKm });
+      }
+      let final = base;
+      if (packageSize === 'large') final = Math.round(final * 1.3);
+      if (packageSize === 'small') final = Math.round(final * 0.8);
+      if (roadCond === 'moderate') final = Math.round(final * 1.1);
+      if (deliverySpeed === 'rapid') final = Math.round(final * 1.2);
+      setPredictedPrice(Math.max(final, 1500)); setPriceReady(true);
+    } catch (err) {
+      console.error(err); setPredictedPrice(3500); setPriceReady(true);
+    } finally { setPriceLoading(false); }
   }
 
   async function submitReview() {
@@ -517,10 +426,10 @@ export function SenderOrderView({ onPriceRequest }: {
         const { data: drv } = await supabase.from('drivers').select('user_id').eq('id', ord.driver_id).single();
         if (drv?.user_id) {
           await supabase.rpc('increment_wallet_balance', { uid: drv.user_id, delta: tip });
-          await supabase.from('wallet_transactions').insert({
+          supabase.from('wallet_transactions').insert({
             user_id: drv.user_id, type: 'topup', amount: tip, status: 'completed',
             description: `Tip from sender — ${reviewComment || 'Great service!'}`,
-          });
+          }).then(() => {}).catch(() => {});
           // Deduct tip from sender wallet
           await supabase.rpc('increment_wallet_balance', { uid: profile.id, delta: -tip });
         }
@@ -556,11 +465,7 @@ export function SenderOrderView({ onPriceRequest }: {
       });
       if (walletErr) throw new Error('Wallet deduction failed: ' + walletErr.message);
 
-      // Log wallet transaction (non-blocking — won't fail the order if table missing)
-      supabase.from('wallet_transactions').insert({
-        user_id: profile.id, type: 'debit', amount: predictedPrice,
-        status: 'completed', description: `Delivery → ${receiverName}`,
-      }).then(() => {}).catch(() => {});
+      // wallet_transactions logging skipped until table is created
 
       // Place order as pending + paid immediately
       const { data: newOrder, error: orderErr } = await supabase.from('orders').insert({
@@ -606,6 +511,21 @@ export function SenderOrderView({ onPriceRequest }: {
           order_id: newOrder.id,
           read:    false,
         });
+      }
+
+      // Push notify all on-duty drivers
+      const { data: onDutyDrivers } = await supabase
+        .from('drivers').select('user_id').eq('is_on_duty', true);
+      if (onDutyDrivers?.length) {
+        supabase.functions.invoke('send-push', {
+          body: {
+            user_ids: onDutyDrivers.map((d: any) => d.user_id),
+            title:    '🏍️ New Delivery Order!',
+            body:     `${receiverLocation} · ${predictedPrice.toLocaleString()} RWF`,
+            url:      '/',
+            tag:      'new-order',
+          },
+        }).catch(() => {});
       }
 
       // Refresh wallet balance
@@ -858,110 +778,55 @@ export function SenderOrderView({ onPriceRequest }: {
       )}
 
       {/* ── PRICE ── */}
-      {/* ── No price yet — receiver not typed ── */}
-      {(!priceReady || predictedPrice === 0) && (
-        <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '14px', padding: '16px', textAlign: 'center' }}>
-          <p style={{ fontSize: '22px', marginBottom: '6px' }}>🗺️</p>
-          <p style={{ fontSize: '13px', color: 'var(--text3)', fontWeight: 600 }}>Enter receiver location to see estimated price</p>
-        </div>
-      )}
-
-      {(priceReady && predictedPrice > 0) && (
-        <div style={{ background: 'var(--yellow-dim)', border: `1px solid ${priceSource === 'gps' ? 'rgba(34,197,94,0.35)' : 'rgba(245,197,24,0.25)'}`, borderRadius: '14px', padding: '20px', textAlign: 'center', transition: 'border-color 0.4s' }}>
-
-          {/* ── SOURCE BADGE ── */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '10px' }}>
-            {priceSource === 'gps' ? (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '20px', padding: '4px 12px', fontSize: '11px', fontWeight: 700, color: 'var(--green)' }}>
-                📍 Precise GPS Price
-              </span>
-            ) : priceSource === 'offline' ? (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(245,197,24,0.1)', border: '1px solid rgba(245,197,24,0.3)', borderRadius: '20px', padding: '4px 12px', fontSize: '11px', fontWeight: 700, color: 'var(--yellow)' }}>
-                🗺️ Zone Estimate
-              </span>
-            ) : (
-              <span style={{ fontSize: '11px', color: 'var(--text3)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.08em' }}>Estimated Price</span>
-            )}
-
-            {/* GPS loading spinner — shows while GPS is still calculating */}
-            {priceSource === 'offline' && priceLoading && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: 'var(--text3)' }}>
-                <div className="spinner" style={{ width: '12px', height: '12px', borderWidth: '2px' }} /> GPS checking…
-              </span>
-            )}
-          </div>
-
-          {/* ── PRICE NUMBER ── */}
-          <p style={{ fontWeight: 900, fontSize: '38px', color: priceSource === 'gps' ? 'var(--green)' : 'var(--yellow)', letterSpacing: '-.02em', marginBottom: '2px', transition: 'color 0.4s' }}>
-            {predictedPrice.toLocaleString()} <span style={{ fontSize: '16px', fontWeight: 600, opacity: 0.6 }}>RWF</span>
-          </p>
-
-          {/* ── ZONE INFO (offline only) ── */}
-          {priceSource === 'offline' && offlineZones && (
-            <div style={{ marginTop: '6px', marginBottom: '8px' }}>
-              <p style={{ fontSize: '12px', color: 'var(--text3)' }}>
-                {offlineZones.from} → {offlineZones.to}
-              </p>
-              <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '2px' }}>
-                {offlineZones.confidence === 'exact'     && '✅ Zone matched exactly'}
-                {offlineZones.confidence === 'near'      && '🟡 Approximate zone match'}
-                {offlineZones.confidence === 'estimated' && '🟠 Rough estimate — GPS will refine'}
-              </p>
-            </div>
-          )}
-
-          {/* ── GPS BREAKDOWN (gps only) ── */}
-          {priceSource === 'gps' && (
-            <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: breakdown ? '12px' : 0 }}>
-              📡 Real road distance · conditions applied
-            </p>
-          )}
-
-          {breakdown && priceSource === 'gps' && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px' }}>
-              <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: '8px', padding: '8px' }}>
-                <p style={{ fontSize: '9px', color: '#92400e', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Driver→Sender</p>
-                <p style={{ fontSize: '14px', fontWeight: 800, color: '#f59e0b' }}>{breakdown.distD2S.toFixed(1)} km</p>
-                <p style={{ fontSize: '10px', color: '#78350f' }}>{breakdown.rate1} RWF/km</p>
-              </div>
-              <div style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '8px', padding: '8px' }}>
-                <p style={{ fontSize: '9px', color: '#166534', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Sender→Receiver</p>
-                <p style={{ fontSize: '14px', fontWeight: 800, color: '#22c55e' }}>{breakdown.distS2R.toFixed(1)} km</p>
-                <p style={{ fontSize: '10px', color: '#14532d' }}>{breakdown.rate2} RWF/km</p>
-              </div>
-              <div style={{ gridColumn: 'span 2', background: breakdown.isHarsh ? 'rgba(239,68,68,0.08)' : 'rgba(34,197,94,0.08)', border: `1px solid ${breakdown.isHarsh ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}`, borderRadius: '8px', padding: '8px' }}>
-                <p style={{ fontSize: '12px', fontWeight: 700, color: breakdown.isHarsh ? 'var(--red)' : 'var(--green)' }}>{breakdown.isHarsh ? '⚡ Surge pricing active' : '✅ Normal pricing'}</p>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── CHECKLIST — shows when price is visible but not all fields done ── */}
-      {!allFilled && (
-        <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px 16px' }}>
-          <p style={{ fontSize: '11px', color: 'var(--text3)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '8px' }}>
-            📋 Complete to place order
-          </p>
-          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-            {[
-              { label: 'Receiver',  done: receiverReady },
-              { label: 'Package',   done: !!packageWeight },
-              { label: 'Wallet',    done: walletBalance >= predictedPrice && predictedPrice > 0 },
-            ].map(c => (
+      {!allFilled ? (
+        <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '14px', padding: '18px', textAlign: 'center' }}>
+          <p style={{ fontSize: '13px', color: 'var(--text3)', fontWeight: 600, marginBottom: '12px' }}>📋 Complete all steps to see AI price</p>
+          <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
+            {[{ label:'Receiver', done: receiverReady },{ label:'Package', done: !!packageWeight },{ label:'Wallet', done: walletBalance >= predictedPrice && predictedPrice > 0 }].map(c => (
               <span key={c.label} style={{ fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: '20px', background: c.done ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.06)', color: c.done ? 'var(--green)' : 'var(--text3)', border: `1px solid ${c.done ? 'rgba(34,197,94,0.25)' : 'var(--border)'}` }}>
                 {c.done ? '✓' : '○'} {c.label}
               </span>
             ))}
           </div>
         </div>
+      ) : (
+        <div style={{ background: 'var(--yellow-dim)', border: '1px solid rgba(245,197,24,0.25)', borderRadius: '14px', padding: '20px', textAlign: 'center' }}>
+          <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 600 }}>AI Predicted Price</p>
+          {priceLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '10px 0' }}>
+              <div className="spinner" /><p style={{ fontSize: '13px', color: 'var(--text3)' }}>Calculating road distance…</p>
+            </div>
+          ) : (
+            <>
+              <p style={{ fontWeight: 700, fontSize: '36px', color: 'var(--yellow)', letterSpacing: '-.02em', marginBottom: '4px' }}>{predictedPrice.toLocaleString()} <span style={{ fontSize: '16px' }}>RWF</span></p>
+              <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: breakdown ? '12px' : 0 }}>🤖 ML model · real road km · conditions applied</p>
+              {breakdown && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px' }}>
+                  <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: '8px', padding: '8px' }}>
+                    <p style={{ fontSize: '9px', color: '#92400e', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Driver→Sender</p>
+                    <p style={{ fontSize: '14px', fontWeight: 800, color: '#f59e0b' }}>{breakdown.distD2S.toFixed(1)} km</p>
+                    <p style={{ fontSize: '10px', color: '#78350f' }}>{breakdown.rate1} RWF/km</p>
+                  </div>
+                  <div style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '8px', padding: '8px' }}>
+                    <p style={{ fontSize: '9px', color: '#166534', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Sender→Receiver</p>
+                    <p style={{ fontSize: '14px', fontWeight: 800, color: '#22c55e' }}>{breakdown.distS2R.toFixed(1)} km</p>
+                    <p style={{ fontSize: '10px', color: '#14532d' }}>{breakdown.rate2} RWF/km</p>
+                  </div>
+                  <div style={{ gridColumn: 'span 2', background: breakdown.isHarsh ? 'rgba(239,68,68,0.08)' : 'rgba(34,197,94,0.08)', border: `1px solid ${breakdown.isHarsh ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}`, borderRadius: '8px', padding: '8px' }}>
+                    <p style={{ fontSize: '12px', fontWeight: 700, color: breakdown.isHarsh ? 'var(--red)' : 'var(--green)' }}>{breakdown.isHarsh ? '⚡ Surge pricing active' : '✅ Normal pricing'}</p>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
       )}
 
       <button type="submit" className="btn-yellow"
-        disabled={loading || priceLoading || !allFilled || walletBalance < predictedPrice}
-        style={{ fontSize: '15px', padding: '13px', opacity: !allFilled ? 0.45 : 1, cursor: !allFilled ? 'not-allowed' : 'pointer' }}>
-        {loading                        ? '⏳ Placing order…' :
-         !allFilled                     ? '📋 Fill all fields to place order' :
+        disabled={loading || priceLoading || !priceReady || walletBalance < predictedPrice}
+        style={{ fontSize: '15px', padding: '13px' }}>
+        {loading          ? '⏳ Placing order…' :
+         !priceReady      ? 'Fill all fields first' :
          walletBalance < predictedPrice ? `⚠️ Top up wallet — need ${predictedPrice.toLocaleString()} RWF` :
          `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF from Wallet`}
       </button>
