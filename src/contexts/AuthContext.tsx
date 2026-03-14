@@ -63,12 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .single();
     setProfile(data);
     setLoading(false);
-    // Register push notifications after profile loads
-    if (data?.id) {
-      import('../lib/pushNotifications')
-        .then(m => m.registerPush(data.id, supabase))
-        .catch(() => {});
-    }
+    // TODO: registerPush(data.id, supabase) — add after pushNotifications.ts is in src/lib/
   }
 
   async function signIn(email: string, password: string) {
