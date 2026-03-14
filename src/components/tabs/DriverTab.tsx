@@ -32,9 +32,6 @@ export function DriverTab() {
   const [msgType, setMsgType] = useState<'success' | 'error'>('success');
   const [loading,     setLoading]     = useState(true);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
-  const [pendingFoodOrders, setPendingFoodOrders] = useState<any[]>([]);
-  const [activeFoodOrder,   setActiveFoodOrder]   = useState<any>(null);
-  const [acceptingFoodId,   setAcceptingFoodId]   = useState<string | null>(null);
 
   // wallet
   const [walletBalance,  setWalletBalance]  = useState(0);
@@ -51,8 +48,7 @@ export function DriverTab() {
     const channel = supabase.channel('driver-orders')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' },     () => loadPendingOrders())
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' },     () => { loadPendingOrders(); loadDriverData(); })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'food_orders'}, () => loadPendingFoodOrders())
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'food_orders'}, () => { loadPendingFoodOrders(); loadDriverData(); })
+
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [profile]);
@@ -94,8 +90,6 @@ export function DriverTab() {
       setWalletTxs(txs || []);
     }
     await loadPendingOrders();
-    await loadPendingFoodOrders();
-    await loadActiveFoodOrder(driver);
     setLoading(false);
   }
 
@@ -107,63 +101,6 @@ export function DriverTab() {
       .is('driver_id', null)
       .order('created_at', { ascending: false });
     setPendingOrders(data || []);
-  }
-
-  async function loadPendingFoodOrders() {
-    const { data } = await supabase
-      .from('food_orders')
-      .select('*')
-      .eq('status', 'pending')
-      .is('driver_user_id', null)
-      .order('created_at', { ascending: false });
-    setPendingFoodOrders(data || []);
-  }
-
-  async function loadActiveFoodOrder(driver: any) {
-    if (!driver) return;
-    const { data } = await supabase
-      .from('food_orders')
-      .select('*')
-      .eq('driver_user_id', driver.user_id)
-      .in('status', ['accepted', 'in_transit'])
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    setActiveFoodOrder(data || null);
-  }
-
-  async function acceptFoodOrder(order: any) {
-    if (!driverInfo || !profile) return;
-    setAcceptingFoodId(order.id);
-    await supabase.from('food_orders').update({
-      driver_user_id: profile.id,
-      driver_plate:   driverInfo.plate_number,
-      status:         'accepted',
-      updated_at:     new Date().toISOString(),
-    }).eq('id', order.id);
-    setAcceptingFoodId(null);
-    setPendingFoodOrders(prev => prev.filter(o => o.id !== order.id));
-    notify('✅ Shop order accepted! Go pick up the items.');
-    await loadActiveFoodOrder(driverInfo);
-  }
-
-  async function markFoodPickedUp() {
-    if (!activeFoodOrder) return;
-    await supabase.from('food_orders').update({ status: 'in_transit', updated_at: new Date().toISOString() }).eq('id', activeFoodOrder.id);
-    notify('📦 Picked up — delivering now!');
-    await loadActiveFoodOrder(driverInfo);
-  }
-
-  async function markFoodDelivered() {
-    if (!activeFoodOrder || !profile) return;
-    // Mark delivered — wait for receiver to confirm before paying 20%
-    await supabase.from('food_orders').update({
-      status:           'delivered',
-      driver_confirmed: true,
-      updated_at:       new Date().toISOString(),
-    }).eq('id', activeFoodOrder.id);
-    notify('🎉 Marked as delivered! Waiting for receiver to confirm.');
-    await loadActiveFoodOrder(driverInfo);
   }
 
   useEffect(() => {
@@ -280,7 +217,6 @@ export function DriverTab() {
 
   const pendingPayment = activeOrder?.status === 'delivered' && activeOrder?.driver_confirmed && !activeOrder?.sender_confirmed;
   const driverEarnings70   = activeOrder     ? Math.round((activeOrder.predicted_price     || 0) * 0.70) : 0;
-  const foodEarnings20     = activeFoodOrder ? Math.round((activeFoodOrder.total           || 0) * 0.20) : 0;
 
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100%' }}>
@@ -465,58 +401,6 @@ export function DriverTab() {
           </div>
         ) : null}
 
-        {/* ── ACTIVE FOOD/SHOP ORDER ── */}
-        {activeFoodOrder && activeFoodOrder.status !== 'delivered' && (
-          <div style={{ background: 'rgba(139,92,246,0.06)', border: '2px solid rgba(139,92,246,0.3)', borderRadius: '14px', padding: '14px', marginBottom: '16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <p style={{ fontWeight: 800, fontSize: '14px', color: '#8b5cf6' }}>🛍️ Shop Order Active</p>
-              <span style={{ fontSize: '11px', fontWeight: 700, color: '#8b5cf6', background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: '8px', padding: '3px 8px' }}>{activeFoodOrder.status}</span>
-            </div>
-            <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '8px' }}>📍 Deliver to: {activeFoodOrder.delivery_address}</p>
-            <div style={{ background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.2)', borderRadius: '8px', padding: '8px 12px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: '12px', color: 'var(--text3)', fontWeight: 600 }}>Your 20% earnings</span>
-              <span style={{ fontSize: '16px', fontWeight: 800, color: 'var(--yellow)' }}>{foodEarnings20.toLocaleString()} RWF</span>
-            </div>
-            {/* Items preview */}
-            <div style={{ background: 'var(--bg2)', borderRadius: '8px', padding: '10px', marginBottom: '10px' }}>
-              <p style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '6px' }}>🛒 Items to deliver</p>
-              {(Array.isArray(activeFoodOrder.items) ? activeFoodOrder.items : []).slice(0, 3).map((item: any, i: number) => (
-                <p key={i} style={{ fontSize: '12px', color: 'var(--text)', marginBottom: '3px' }}>{item.name} × {item.qty}</p>
-              ))}
-              {(activeFoodOrder.items?.length || 0) > 3 && <p style={{ fontSize: '11px', color: 'var(--text3)' }}>+{activeFoodOrder.items.length - 3} more</p>}
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              {activeFoodOrder.status === 'accepted' && (
-                <button onClick={markFoodPickedUp} style={{ flex: 1, background: 'rgba(139,92,246,0.12)', border: '1px solid rgba(139,92,246,0.35)', borderRadius: '10px', padding: '11px', color: '#8b5cf6', cursor: 'pointer', fontWeight: 800, fontSize: '13px', fontFamily: 'Space Grotesk, sans-serif' }}>
-                  📦 Mark Picked Up
-                </button>
-              )}
-              {activeFoodOrder.status === 'in_transit' && (
-                <button onClick={markFoodDelivered} style={{ flex: 1, background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.35)', borderRadius: '10px', padding: '11px', color: 'var(--green)', cursor: 'pointer', fontWeight: 800, fontSize: '13px', fontFamily: 'Space Grotesk, sans-serif' }}>
-                  ✅ Confirm Delivered
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Food order waiting for receiver confirmation */}
-        {activeFoodOrder?.status === 'delivered' && activeFoodOrder?.driver_confirmed && !activeFoodOrder?.receiver_confirmed && (
-          <div style={{ background: 'rgba(245,197,24,0.06)', border: '2px solid rgba(245,197,24,0.3)', borderRadius: '14px', padding: '14px', marginBottom: '16px', textAlign: 'center' }}>
-            <p style={{ fontSize: '28px', marginBottom: '8px' }}>⏳</p>
-            <p style={{ fontWeight: 800, fontSize: '15px', color: 'var(--yellow)', marginBottom: '6px' }}>Waiting for receiver to confirm shop delivery</p>
-            <p style={{ fontSize: '12px', color: 'var(--text3)' }}>Once confirmed, <strong style={{ color: 'var(--yellow)' }}>{foodEarnings20.toLocaleString()} RWF</strong> (20%) will be added to your wallet.</p>
-          </div>
-        )}
-
-        {/* Food order payment received */}
-        {activeFoodOrder?.status === 'delivered' && activeFoodOrder?.receiver_confirmed && (
-          <div style={{ background: 'rgba(34,197,94,0.06)', border: '2px solid rgba(34,197,94,0.3)', borderRadius: '14px', padding: '14px', marginBottom: '16px', textAlign: 'center' }}>
-            <p style={{ fontSize: '28px', marginBottom: '8px' }}>🎉</p>
-            <p style={{ fontWeight: 800, fontSize: '15px', color: 'var(--green)', marginBottom: '4px' }}>Shop delivery payment received!</p>
-            <p style={{ fontSize: '13px', color: 'var(--text3)' }}><strong style={{ color: 'var(--green)' }}>{foodEarnings20.toLocaleString()} RWF</strong> added to your wallet</p>
-          </div>
-        )}
 
         {/* ── AVAILABLE ORDERS ── */}
         {driverInfo?.is_on_duty ? (

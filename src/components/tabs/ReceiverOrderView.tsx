@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { Search, ShoppingCart, X, Plus, Minus, ChevronLeft, Star, Clock, MapPin, Check, Pill } from 'lucide-react';
+import { offlinePrice, isOfflineRushHour } from '../../lib/kigaliPricing';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface FoodItem {
@@ -157,10 +158,22 @@ export function ReceiverOrderView({ onClose }: { onClose?: () => void } = {}) {
   const [placing,       setPlacing]       = useState(false);
   const [orderId,       setOrderId]       = useState('');
 
-  const cartCount  = cart.reduce((s, i) => s + i.qty, 0);
-  const subtotal   = cart.reduce((s, i) => s + i.price * i.qty, 0);
-  const deliveryFee = subtotal > 0 ? 500 : 0;
-  const total      = subtotal + deliveryFee;
+  const cartCount = cart.reduce((s, i) => s + i.qty, 0);
+  const subtotal  = cart.reduce((s, i) => s + i.price * i.qty, 0);
+
+  // ── Delivery fee: calculated from Easy GO Shop (CBD Downtown) → receiver address
+  const SHOP_ORIGIN = 'CBD Downtown Kigali';
+  const shopDelivery = subtotal > 0 && address.trim().length > 1
+    ? offlinePrice({
+        senderLocation:   SHOP_ORIGIN,
+        receiverLocation: address,
+        isRushHour:       isOfflineRushHour(),
+      })
+    : null;
+  const deliveryFee = shopDelivery ? shopDelivery.priceRwf : (subtotal > 0 ? 1500 : 0);
+  const deliveryKm  = shopDelivery ? shopDelivery.distKm   : null;
+  const deliveryZone = shopDelivery ? shopDelivery.toZone  : null;
+  const total       = subtotal + deliveryFee;
 
   const filteredFoods = DEMO_FOODS.filter(f => {
     const matchCat    = foodCat === 'all' || f.category === foodCat || (foodCat === 'combo' && f.category.startsWith('combo'));
@@ -294,14 +307,24 @@ export function ReceiverOrderView({ onClose }: { onClose?: () => void } = {}) {
             ))}
             <div style={{ borderTop: '1px solid var(--border)', marginTop: '10px', paddingTop: '10px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                <span style={{ fontSize: '12px', color: 'var(--text3)' }}>Subtotal</span>
+                <span style={{ fontSize: '12px', color: 'var(--text3)' }}>🛒 Products</span>
                 <span style={{ fontSize: '12px', color: 'var(--text)' }}>{subtotal.toLocaleString()} RWF</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <span style={{ fontSize: '12px', color: 'var(--text3)' }}>Delivery fee</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                <div>
+                  <span style={{ fontSize: '12px', color: 'var(--text3)' }}>🏍️ Delivery fee</span>
+                  {deliveryKm && (
+                    <p style={{ fontSize: '10px', color: 'var(--text3)', marginTop: '2px' }}>
+                      📍 Shop (CBD) → {deliveryZone} · {deliveryKm}km
+                    </p>
+                  )}
+                  {!deliveryKm && address.trim().length > 1 && (
+                    <p style={{ fontSize: '10px', color: '#f59e0b', marginTop: '2px' }}>⚠️ Location not recognised — default fee applied</p>
+                  )}
+                </div>
                 <span style={{ fontSize: '12px', color: 'var(--text)' }}>{deliveryFee.toLocaleString()} RWF</span>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--border)', paddingTop: '8px' }}>
                 <span style={{ fontSize: '15px', fontWeight: 800, color: 'var(--text)' }}>Total</span>
                 <span style={{ fontSize: '15px', fontWeight: 800, color: 'var(--yellow)' }}>{total.toLocaleString()} RWF</span>
               </div>
@@ -371,8 +394,9 @@ export function ReceiverOrderView({ onClose }: { onClose?: () => void } = {}) {
             </div>
           ))}
           <div className="card" style={{ marginTop: '8px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}><span style={{ fontSize: '13px', color: 'var(--text3)' }}>Subtotal</span><span style={{ fontSize: '13px', color: 'var(--text)' }}>{subtotal.toLocaleString()} RWF</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px' }}><span style={{ fontSize: '13px', color: 'var(--text3)' }}>Delivery</span><span style={{ fontSize: '13px', color: 'var(--text)' }}>{deliveryFee.toLocaleString()} RWF</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}><span style={{ fontSize: '13px', color: 'var(--text3)' }}>🛒 Products</span><span style={{ fontSize: '13px', color: 'var(--text)' }}>{subtotal.toLocaleString()} RWF</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}><span style={{ fontSize: '13px', color: 'var(--text3)' }}>🏍️ Delivery</span><span style={{ fontSize: '13px', color: 'var(--text)' }}>{deliveryFee.toLocaleString()} RWF</span></div>
+            {deliveryKm && <div style={{ marginBottom: '8px' }}><span style={{ fontSize: '10px', color: 'var(--text3)' }}>📍 Shop (CBD) → {deliveryZone} · {deliveryKm}km — enter address at checkout for exact fee</span></div>}
             <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: '10px', borderTop: '1px solid var(--border)' }}>
               <span style={{ fontSize: '16px', fontWeight: 800, color: 'var(--text)' }}>Total</span>
               <span style={{ fontSize: '16px', fontWeight: 800, color: 'var(--yellow)' }}>{total.toLocaleString()} RWF</span>

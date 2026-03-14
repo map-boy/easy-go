@@ -4,11 +4,12 @@ import { SenderOrderTab } from './tabs/SenderOrderTab';
 import { TrackTab }       from './tabs/TrackTab';
 import { ProfileTab }     from './tabs/ProfileTab';
 import { DriverTab }      from './tabs/DriverTab';
+import { DriverShopTab } from './tabs/DriverShopTab';
 import { ReceiverTab }    from './tabs/ReceiverTab';
 import { MyParcelTab }    from './tabs/MyParcelTab';
 import { useAuth }        from '../contexts/AuthContext';
 
-type TabType = 'home' | 'order' | 'track' | 'profile';
+type TabType = 'home' | 'order' | 'track' | 'profile' | 'shop';
 
 interface DashboardProps {
   demo?: boolean;
@@ -45,6 +46,7 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
   ] : isDriver ? [
     { id: 'home'    as TabType, label: 'Home',    emoji: '🏠' },
     { id: 'order'   as TabType, label: 'Orders',  emoji: '🏍️' },
+    { id: 'shop'    as TabType, label: 'Shop',    emoji: '🛍️' },
     { id: 'track'   as TabType, label: 'Track',   emoji: '📍' },
     { id: 'profile' as TabType, label: 'Profile', emoji: '👤' },
   ] : [
@@ -74,6 +76,7 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
       if (isDriver)   return <DriverTab />;
       return <SenderOrderTab />;
     }
+    if (activeTab === 'shop') return <DriverShopTab />;
     if (activeTab === 'home') return <HomeTab />;
     return null;
   }
