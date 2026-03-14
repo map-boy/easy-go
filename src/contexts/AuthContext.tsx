@@ -1,5 +1,4 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { registerPush } from '../lib/pushNotifications';
 import { supabase } from '../lib/supabase';
 
 interface Profile {
@@ -65,7 +64,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile(data);
     setLoading(false);
     // Register push notifications after profile loads
-    if (data?.id) registerPush(data.id, supabase).catch(() => {});
+    if (data?.id) {
+      import('../lib/pushNotifications')
+        .then(m => m.registerPush(data.id, supabase))
+        .catch(() => {});
+    }
   }
 
   async function signIn(email: string, password: string) {
