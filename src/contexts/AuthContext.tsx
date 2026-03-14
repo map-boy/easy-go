@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { registerPush } from '../lib/pushNotifications';
 import { supabase } from '../lib/supabase';
 
 interface Profile {
@@ -63,7 +64,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .single();
     setProfile(data);
     setLoading(false);
-    // TODO: registerPush(data.id, supabase) — add after pushNotifications.ts is in src/lib/
+    // Register push notifications
+    if (data?.id) registerPush(data.id, supabase).catch(() => {});
   }
 
   async function signIn(email: string, password: string) {
