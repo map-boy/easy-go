@@ -9,10 +9,10 @@ import {
   Package, DollarSign, AlertCircle, CloudRain,
   CheckCircle, User, Search, X, MapPin, ChevronDown,
 } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
+import { supabase } from '../../../lib/supabase';
 import { Star } from 'lucide-react';
-import { useAuth } from '../../contexts/AuthContext';
-import { predictPrice, isRushHour, haversineKm } from '../../lib/pricePredictor';
+import { useAuth } from '../../../contexts/AuthContext';
+import { predictPrice, isRushHour, haversineKm } from '../../../lib/pricePredictor';
 
 const RWANDA_DISTRICTS = [
   'Gasabo','Kicukiro','Nyarugenge',
