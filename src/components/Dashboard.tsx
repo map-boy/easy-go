@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { HomeTab }        from './tabs/HomeTab';
 import { SenderOrderTab } from './tabs/SenderOrderTab';
@@ -36,14 +36,7 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
   const LOCKED_TABS_DEMO: TabType[] = ['order', 'profile'];
   const [showDemoLock, setShowDemoLock] = useState(false);
 
-  // Register push notifications when user logs in (dynamic import — works even if file missing)
-  useEffect(() => {
-    if (profile?.id) {
-      import('../lib/pushNotifications')
-        .then(({ registerPush }) => registerPush(profile!.id, supabase))
-        .catch(() => {});
-    }
-  }, [profile?.id]);
+
 
   const isDriver   = profile?.user_category === 'motari'   || profile?.role === 'driver';
   const isReceiver = profile?.user_category === 'receiver' || profile?.role === 'receiver';
