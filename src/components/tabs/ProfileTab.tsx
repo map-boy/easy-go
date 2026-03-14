@@ -30,6 +30,7 @@ export function ProfileTab() {
   const [showTopup,     setShowTopup]     = useState(false);
   const [topupAmount,   setTopupAmount]   = useState('');
   const [topupPhone,    setTopupPhone]    = useState('');
+  const [topupName,     setTopupName]     = useState('');
   const [topupStep,     setTopupStep]     = useState<'form'|'requesting'|'pending'|'success'|'failed'>('form');
   const [topupError,    setTopupError]    = useState('');
 
@@ -67,51 +68,24 @@ export function ProfileTab() {
     setWalletLoading(false);
   }
 
-  async function handleTopup() {
+  function handleTopup() {
     const amount = parseInt(topupAmount.replace(/\D/g, ''));
     if (!amount || amount < 500) { setTopupError('Minimum top-up is 500 RWF'); return; }
-    if (!topupPhone.trim())      { setTopupError('Enter your MoMo phone number'); return; }
+    if (!topupName.trim()) { setTopupError('Enter the name of the MoMo account holder'); return; }
     setTopupError('');
-    setTopupStep('requesting');
-    try {
-      const NOOR_URL = (import.meta as any).env?.VITE_NOOR_URL || 'http://localhost:3001';
-      const NOOR_KEY = (import.meta as any).env?.VITE_NOOR_API_KEY || '';
-      const { data: tx } = await supabase.from('wallet_transactions').insert({
-        user_id: profile!.id, type: 'topup', amount,
-        status: 'pending', description: `Wallet top-up ${amount.toLocaleString()} RWF`,
-      }).select('id').single();
-      const phone = topupPhone.startsWith('+') ? topupPhone : `+250${topupPhone.replace(/^0/, '')}`;
-      const res = await fetch(`${NOOR_URL}/payments/request`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': NOOR_KEY },
-        body: JSON.stringify({ orderId: tx?.id || 'topup', amount, phoneNumber: phone, payerName: profile!.full_name }),
-      });
-      if (!res.ok) throw new Error('Payment request failed');
-      setTopupStep('pending');
-      const data = await res.json();
-      const ref  = data.referenceId || data.reference_id || data.id;
-      if (!ref) throw new Error('No reference returned');
-      // Poll for status
-      for (let i = 0; i < 12; i++) {
-        await new Promise(r => setTimeout(r, 5000));
-        const sr = await fetch(`${NOOR_URL}/payments/status/${ref}`, {
-          headers: { 'x-api-key': NOOR_KEY },
-        });
-        const sd = await sr.json();
-        if (sd.status === 'SUCCESSFUL') {
-          await supabase.from('wallet_transactions').update({ status: 'completed' }).eq('id', tx?.id);
-          await supabase.rpc('increment_wallet_balance', { uid: profile!.id, delta: amount });
-          setTopupStep('success');
-          loadWallet();
-          return;
-        }
-        if (['FAILED', 'REJECTED', 'TIMEOUT'].includes(sd.status)) throw new Error(sd.status);
-      }
-      throw new Error('Timeout');
-    } catch (e: any) {
-      setTopupError(e.message || 'Payment failed');
-      setTopupStep('failed');
-    }
+    // Build USSD code: *182*8*1*1105179*AMOUNT#
+    const ussd = `*182*8*1*1105179*${amount}#`;
+    // On mobile this opens the dialer with the USSD code
+    window.location.href = `tel:${encodeURIComponent(ussd)}`;
+    // Log a pending transaction — admin confirms later
+    supabase.from('wallet_transactions').insert({
+      user_id: profile!.id,
+      type: 'topup',
+      amount,
+      status: 'pending',
+      description: `MoMo top-up ${amount.toLocaleString()} RWF — from ${topupName.trim()} (${topupPhone || 'no phone'}) — pending admin confirmation`,
+    }).then(() => {}).catch(() => {});
+    setTopupStep('pending');
   }
 
   async function handlePhotoChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -215,7 +189,7 @@ export function ProfileTab() {
         <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)', marginBottom: '14px' }}>Available balance</p>
 
         {/* Top up button */}
-        <button onClick={() => { setShowTopup(true); setTopupStep('form'); setTopupAmount(''); setTopupError(''); }}
+        <button onClick={() => { setShowTopup(true); setTopupStep('form'); setTopupAmount(''); setTopupError(''); setTopupName(''); }}
           style={{ width: '100%', padding: '11px', background: '#f5c518', border: 'none', borderRadius: '10px', fontWeight: 800, fontSize: '13px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
           <Plus size={14} /> Top Up Wallet
         </button>
@@ -440,8 +414,18 @@ export function ProfileTab() {
 
             {topupStep === 'form' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+
+                {/* How it works */}
+                <div style={{ background: 'rgba(245,197,24,0.06)', border: '1px solid rgba(245,197,24,0.2)', borderRadius: '12px', padding: '12px 14px' }}>
+                  <p style={{ fontSize: '12px', fontWeight: 700, color: 'var(--yellow)', marginBottom: '6px' }}>📲 How it works</p>
+                  <p style={{ fontSize: '12px', color: 'var(--text3)', lineHeight: 1.6 }}>
+                    Enter the amount below. When you tap <strong style={{ color: 'var(--text)' }}>Pay with MoMo</strong>, your phone dialer will open with the USSD code already filled in. Just press <strong style={{ color: 'var(--yellow)' }}>Call/Send</strong> to complete the payment.
+                  </p>
+                </div>
+
+                {/* Amount */}
                 <div>
-                  <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '6px' }}>Amount (RWF)</p>
+                  <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '8px' }}>Amount (RWF)</p>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px', marginBottom: '10px' }}>
                     {[1000, 2000, 5000, 10000].map(a => (
                       <button key={a} onClick={() => setTopupAmount(String(a))}
@@ -453,57 +437,72 @@ export function ProfileTab() {
                   <input type="number" placeholder="Or enter custom amount…" value={topupAmount} onChange={e => setTopupAmount(e.target.value)}
                     style={{ width: '100%', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '10px', padding: '12px 14px', fontSize: '15px', fontWeight: 800, color: 'var(--text)', fontFamily: 'Space Grotesk, sans-serif', outline: 'none', boxSizing: 'border-box' }} />
                 </div>
+
+                {/* MoMo account name */}
                 <div>
-                  <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '6px' }}>📱 MoMo Phone Number</p>
-                  <input type="tel" placeholder="+250 7XX XXX XXX" value={topupPhone} onChange={e => setTopupPhone(e.target.value)}
-                    style={{ width: '100%', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '10px', padding: '12px 14px', fontSize: '14px', color: 'var(--text)', fontFamily: 'Space Grotesk, sans-serif', outline: 'none', boxSizing: 'border-box' }} />
+                  <p style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '8px' }}>👤 Name on MoMo Account</p>
+                  <input
+                    type="text"
+                    placeholder="e.g. Jean Pierre Habimana"
+                    value={topupName}
+                    onChange={e => setTopupName(e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '10px', padding: '12px 14px', fontSize: '14px', color: 'var(--text)', fontFamily: 'Space Grotesk, sans-serif', outline: 'none', boxSizing: 'border-box' }}
+                  />
+                  <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '5px' }}>The name registered on your MTN MoMo account</p>
                 </div>
+
+                {/* USSD preview */}
+                {topupAmount && parseInt(topupAmount) >= 500 && (
+                  <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px 14px' }}>
+                    <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '6px', fontWeight: 600 }}>USSD code that will open:</p>
+                    <p style={{ fontFamily: 'monospace', fontSize: '18px', fontWeight: 900, color: 'var(--yellow)', letterSpacing: '.05em' }}>
+                      *182*8*1*1105179*{topupAmount}#
+                    </p>
+                  </div>
+                )}
+
                 {topupError && <p style={{ fontSize: '12px', color: '#ef4444', fontWeight: 600 }}>⚠️ {topupError}</p>}
+
                 <button onClick={handleTopup}
-                  style={{ width: '100%', padding: '14px', background: 'var(--yellow)', border: 'none', borderRadius: '12px', fontWeight: 800, fontSize: '15px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif' }}>
-                  Pay via MTN MoMo →
+                  style={{ width: '100%', padding: '15px', background: 'var(--yellow)', border: 'none', borderRadius: '12px', fontWeight: 800, fontSize: '16px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  📱 Open MoMo Dialer →
                 </button>
-                <p style={{ fontSize: '11px', color: 'var(--text3)', textAlign: 'center' }}>You will receive a prompt on your phone to confirm</p>
+                <p style={{ fontSize: '11px', color: 'var(--text3)', textAlign: 'center' }}>
+                  Your dialer will open with the code. Press Call/Send to pay. Balance updates after admin confirms.
+                </p>
               </div>
             )}
-            {topupStep === 'requesting' && (
-              <div style={{ textAlign: 'center', padding: '20px 0' }}>
-                <div style={{ fontSize: '48px', marginBottom: '14px' }}>📲</div>
-                <p style={{ fontWeight: 800, fontSize: '16px', color: 'var(--text)', marginBottom: '8px' }}>Sending payment request…</p>
-                <p style={{ fontSize: '13px', color: 'var(--text3)' }}>Connecting to MTN MoMo</p>
-              </div>
-            )}
+
             {topupStep === 'pending' && (
               <div style={{ textAlign: 'center', padding: '20px 0' }}>
-                <div style={{ fontSize: '48px', marginBottom: '14px' }}>⏳</div>
-                <p style={{ fontWeight: 800, fontSize: '16px', color: 'var(--text)', marginBottom: '8px' }}>Waiting for your approval</p>
-                <p style={{ fontSize: '13px', color: 'var(--text3)', marginBottom: '16px' }}>Check your phone and confirm the MoMo payment</p>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: '6px' }}>
-                  {[0,1,2].map(i => <div key={i} style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--yellow)', animation: `tt-dot 1.4s ease ${i * 0.2}s infinite` }} />)}
+                <div style={{ fontSize: '56px', marginBottom: '14px' }}>📲</div>
+                <p style={{ fontWeight: 800, fontSize: '17px', color: 'var(--text)', marginBottom: '8px' }}>Dialer Opened!</p>
+                <p style={{ fontSize: '13px', color: 'var(--text3)', lineHeight: 1.6, marginBottom: '16px' }}>
+                  Complete the payment on your phone.<br/>
+                  Your balance will be updated after confirmation.
+                </p>
+                {topupName && (
+                  <p style={{ fontSize: '13px', color: 'var(--text3)', marginBottom: '8px' }}>
+                    Account: <strong style={{ color: 'var(--text)' }}>{topupName}</strong>
+                  </p>
+                )}
+                {/* Show the USSD code in case they need to dial manually */}
+                <div style={{ background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '12px', padding: '14px', marginBottom: '20px' }}>
+                  <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '6px' }}>Or dial manually:</p>
+                  <p style={{ fontFamily: 'monospace', fontSize: '20px', fontWeight: 900, color: 'var(--yellow)' }}>
+                    *182*8*1*1105179*{topupAmount}#
+                  </p>
                 </div>
-              </div>
-            )}
-            {topupStep === 'success' && (
-              <div style={{ textAlign: 'center', padding: '20px 0' }}>
-                <div style={{ fontSize: '56px', marginBottom: '14px' }}>🎉</div>
-                <p style={{ fontWeight: 800, fontSize: '18px', color: 'var(--text)', marginBottom: '8px' }}>Top-up Successful!</p>
-                <p style={{ fontSize: '14px', color: '#22c55e', fontWeight: 700, marginBottom: '6px' }}>+{parseInt(topupAmount).toLocaleString()} RWF added</p>
-                <p style={{ fontSize: '13px', color: 'var(--text3)', marginBottom: '20px' }}>Your wallet balance has been updated</p>
-                <button onClick={() => { setShowTopup(false); setTopupStep('form'); }}
-                  style={{ padding: '12px 32px', background: 'var(--yellow)', border: 'none', borderRadius: '12px', fontWeight: 800, fontSize: '14px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif' }}>
-                  Done ✓
-                </button>
-              </div>
-            )}
-            {topupStep === 'failed' && (
-              <div style={{ textAlign: 'center', padding: '20px 0' }}>
-                <div style={{ fontSize: '48px', marginBottom: '14px' }}>❌</div>
-                <p style={{ fontWeight: 800, fontSize: '16px', color: 'var(--text)', marginBottom: '8px' }}>Payment Failed</p>
-                <p style={{ fontSize: '13px', color: 'var(--text3)', marginBottom: '20px' }}>{topupError || 'The payment was not completed. Please try again.'}</p>
-                <button onClick={() => setTopupStep('form')}
-                  style={{ padding: '12px 28px', background: 'var(--yellow)', border: 'none', borderRadius: '12px', fontWeight: 800, fontSize: '14px', color: '#0a0a0a', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif' }}>
-                  Try Again
-                </button>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button onClick={() => { setShowTopup(false); setTopupStep('form'); loadWallet(); }}
+                    style={{ flex: 1, padding: '12px', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '12px', fontWeight: 800, fontSize: '14px', color: 'var(--green)', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif' }}>
+                    Done ✓
+                  </button>
+                  <button onClick={() => setTopupStep('form')}
+                    style={{ flex: 1, padding: '12px', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '12px', fontWeight: 700, fontSize: '13px', color: 'var(--text3)', cursor: 'pointer', fontFamily: 'Space Grotesk, sans-serif' }}>
+                    Try Again
+                  </button>
+                </div>
               </div>
             )}
           </div>
