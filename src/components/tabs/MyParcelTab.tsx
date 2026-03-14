@@ -193,15 +193,22 @@ export function MyParcelTab() {
 
   async function confirmReceipt(orderId: string) {
     setConfirmingId(orderId);
-    const { data: ord } = await supabase.from('orders').select('driver_id, predicted_price').eq('id', orderId).single();
-    await supabase.from('orders').update({ receiver_confirmed: true, sender_confirmed: true, status: 'delivered', updated_at: new Date().toISOString() }).eq('id', orderId);
+    // Fetch + update in parallel
+    const [{ data: ord }] = await Promise.all([
+      supabase.from('orders').select('driver_id, predicted_price').eq('id', orderId).single(),
+      supabase.from('orders').update({ receiver_confirmed: true, sender_confirmed: true, status: 'delivered', updated_at: new Date().toISOString() }).eq('id', orderId),
+    ]);
+    // Pay driver non-blocking
     if (ord?.driver_id && ord?.predicted_price) {
       const earning = Math.round(ord.predicted_price * 0.7);
-      const { data: drv } = await supabase.from('drivers').select('user_id').eq('id', ord.driver_id).single();
-      if (drv?.user_id) {
-        await supabase.rpc('increment_wallet_balance', { uid: drv.user_id, delta: earning });
-        await supabase.from('wallet_transactions').insert({ user_id: drv.user_id, type: 'topup', amount: earning, status: 'completed', description: `Delivery earnings (70%) — order #${orderId.slice(0, 8)}` });
-      }
+      supabase.from('drivers').select('user_id').eq('id', ord.driver_id).single().then(({ data: drv }) => {
+        if (drv?.user_id) {
+          supabase.rpc('increment_wallet_balance', { uid: drv.user_id, delta: earning }).then(() => {
+            supabase.from('wallet_transactions').insert({ user_id: drv.user_id, type: 'topup', amount: earning, status: 'completed', description: `Delivery earnings (70%) — order #${orderId.slice(0, 8)}` }).then(() => {}).catch(() => {});
+            supabase.functions.invoke('send-push', { body: { user_ids: [drv.user_id], title: '💰 Payment Received!', body: `You received ${earning.toLocaleString()} RWF for delivery #${orderId.slice(0, 8)}`, url: '/', tag: 'driver-paid' } }).catch(() => {});
+          }).catch(() => {});
+        }
+      });
     }
     setConfirmingId(null);
     loadOrders();
@@ -210,31 +217,38 @@ export function MyParcelTab() {
   async function confirmFoodReceipt(orderId: string) {
     setConfirmingId(orderId);
     try {
-      // Get the food order to find driver and delivery_fee
-      const { data: ord } = await supabase
-        .from('food_orders')
-        .select('driver_user_id, delivery_fee')
-        .eq('id', orderId)
-        .single();
+      // Step 1: fetch order + update confirmed status in parallel
+      const [{ data: ord }] = await Promise.all([
+        supabase.from('food_orders').select('driver_user_id, delivery_fee').eq('id', orderId).single(),
+        supabase.from('food_orders').update({
+          receiver_confirmed: true,
+          status:             'delivered',
+          updated_at:         new Date().toISOString(),
+        }).eq('id', orderId),
+      ]);
 
-      // Mark receiver confirmed
-      await supabase.from('food_orders').update({
-        receiver_confirmed: true,
-        status:             'delivered',
-        updated_at:         new Date().toISOString(),
-      }).eq('id', orderId);
-
-      // Pay driver 70% of delivery_fee only
+      // Step 2: pay driver (non-blocking — don't wait)
       if (ord?.driver_user_id && ord?.delivery_fee) {
         const driverPay = Math.round(ord.delivery_fee * 0.7);
-        await supabase.rpc('increment_wallet_balance', { uid: ord.driver_user_id, delta: driverPay });
-        supabase.from('wallet_transactions').insert({
-          user_id:     ord.driver_user_id,
-          type:        'topup',
-          amount:      driverPay,
-          status:      'completed',
-          description: `Shop delivery earnings (70%) — order #${orderId.slice(0, 8)}`,
-        }).then(() => {}).catch(() => {});
+        supabase.rpc('increment_wallet_balance', { uid: ord.driver_user_id, delta: driverPay }).then(() => {
+          supabase.from('wallet_transactions').insert({
+            user_id:     ord.driver_user_id,
+            type:        'topup',
+            amount:      driverPay,
+            status:      'completed',
+            description: `Shop delivery earnings (70%) — order #${orderId.slice(0, 8)}`,
+          }).then(() => {}).catch(() => {});
+          // Push notify driver they got paid
+          supabase.functions.invoke('send-push', {
+            body: {
+              user_ids: [ord.driver_user_id],
+              title:    '💰 Payment Received!',
+              body:     `You received ${driverPay.toLocaleString()} RWF for shop delivery #${orderId.slice(0, 8)}`,
+              url:      '/',
+              tag:      'driver-paid',
+            },
+          }).catch(() => {});
+        }).catch(() => {});
       }
 
       loadOrders();
