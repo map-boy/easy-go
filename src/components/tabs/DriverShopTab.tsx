@@ -62,6 +62,14 @@ export function DriverShopTab() {
     setPendingOrders(pending || []);
   }
 
+  function pushTo(userIds: (string|null|undefined)[], title: string, body: string, tag = 'shop') {
+    const ids = userIds.filter(Boolean) as string[];
+    if (!ids.length) return;
+    supabase.functions.invoke('send-push', {
+      body: { user_ids: ids, title, body, url: '/', tag },
+    }).catch(() => {});
+  }
+
   function showMsg(text: string, type: 'success' | 'error' = 'success') {
     setMsg(text);
     setMsgType(type);
@@ -85,6 +93,8 @@ export function DriverShopTab() {
       const { error } = await supabase.from('food_orders').update(updatePayload).eq('id', order.id);
 
       if (error) throw error;
+      // Notify customer their order was accepted
+      pushTo([order.user_id], '🏍️ Driver Accepted Your Order!', `Your driver is on the way to collect your items`, 'shop-accepted');
       showMsg('✅ Order accepted! Go pick it up.');
       loadOrders();
     } catch (e: any) {
@@ -99,8 +109,10 @@ export function DriverShopTab() {
       status:     'in_transit',
       updated_at: new Date().toISOString(),
     }).eq('id', order.id);
-    if (error) showMsg('❌ ' + error.message, 'error');
-    else { showMsg('🚀 On the way to customer!'); loadOrders(); }
+    if (error) { showMsg('❌ ' + error.message, 'error'); return; }
+    pushTo([activeOrder.user_id], '🚀 Your Order Is On The Way!', `Driver has picked up your items and is heading to you`, 'shop-transit');
+    showMsg('🚀 On the way to customer!');
+    loadOrders();
   }
 
   async function markDelivered(order: any) {
@@ -109,8 +121,10 @@ export function DriverShopTab() {
       driver_confirmed: true,
       updated_at:       new Date().toISOString(),
     }).eq('id', order.id);
-    if (error) showMsg('❌ ' + error.message, 'error');
-    else { showMsg('📦 Marked as delivered! Waiting for customer to confirm receipt.'); loadOrders(); }
+    if (error) { showMsg('❌ ' + error.message, 'error'); return; }
+    pushTo([activeOrder.user_id], '🎉 Your Order Has Arrived!', `Your items have been delivered. Please confirm receipt in the app.`, 'shop-delivered');
+    showMsg('📦 Marked as delivered! Waiting for customer to confirm receipt.');
+    loadOrders();
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────

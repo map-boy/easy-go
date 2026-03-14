@@ -527,6 +527,18 @@ export function SenderOrderView({ onPriceRequest }: {
           },
         }).catch(() => {});
       }
+      // Push notify receiver that someone is sending them a package
+      if (receiverId) {
+        supabase.functions.invoke('send-push', {
+          body: {
+            user_ids: [receiverId],
+            title:    '📦 Someone is Sending You a Package!',
+            body:     `${(profile as any).full_name} is sending you a package from ${(profile as any).location}`,
+            url:      '/',
+            tag:      'incoming-package',
+          },
+        }).catch(() => {});
+      }
 
       // Refresh wallet balance
       const { data: wd } = await supabase.from('profiles').select('wallet_balance').eq('id', profile.id).single();

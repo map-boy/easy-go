@@ -130,6 +130,15 @@ export function DriverTab() {
     notify(newDuty ? '✅ You are now ON DUTY — orders will appear' : '🔴 You are OFF DUTY');
   }
 
+  // ── Push notification helper ─────────────────────────────────────────────
+  function pushTo(userIds: (string|null|undefined)[], title: string, body: string, tag = 'order') {
+    const ids = userIds.filter(Boolean) as string[];
+    if (!ids.length) return;
+    supabase.functions.invoke('send-push', {
+      body: { user_ids: ids, title, body, url: '/', tag },
+    }).catch(() => {});
+  }
+
   async function acceptOrder(order: any) {
     if (!driverInfo) return;
     setAcceptingId(order.id);
@@ -145,6 +154,9 @@ export function DriverTab() {
       await createNotification(order.receiver_id, '📦 Your Package is Coming!',
         `A driver has accepted delivery to ${order.receiver_location}`, 'order_accepted', order.id);
     }
+    // Push notifications
+    pushTo([order.sender_id], '🏍️ Driver Accepted Your Order!', `Driver is on the way to pick up from ${order.sender_location}`, 'order-accepted');
+    if (order.receiver_id) pushTo([order.receiver_id], '📦 Your Package is Coming!', `A driver accepted delivery to ${order.receiver_location}`, 'order-accepted');
     notify('✅ Order accepted! Navigate to pickup.');
     loadDriverData();
   }
@@ -158,13 +170,14 @@ export function DriverTab() {
       await createNotification(activeOrder.receiver_id, '🚀 Package In Transit!',
         `Your package is on its way — arriving at ${activeOrder.receiver_location}`, 'in_transit', activeOrder.id);
     }
+    pushTo([activeOrder.sender_id], '📦 Package Picked Up!', `Your package is now in transit to ${activeOrder.receiver_location}`, 'in-transit');
+    if (activeOrder.receiver_id) pushTo([activeOrder.receiver_id], '🚀 Package On The Way!', `Your package is heading to ${activeOrder.receiver_location}`, 'in-transit');
     notify('📦 Marked as picked up — in transit!');
     loadDriverData();
   }
 
   async function markDelivered() {
     if (!activeOrder) return;
-    // Mark as delivered — driver confirmed. Sender must still confirm.
     await supabase.from('orders').update({
       status: 'delivered', driver_confirmed: true, updated_at: new Date().toISOString(),
     }).eq('id', activeOrder.id);
@@ -174,6 +187,8 @@ export function DriverTab() {
       await createNotification(activeOrder.receiver_id, '🎉 Package Arrived!',
         `Your package has been delivered. Please confirm receipt.`, 'delivered', activeOrder.id);
     }
+    pushTo([activeOrder.sender_id], '✅ Package Delivered!', `Confirm receipt in the app to release driver payment`, 'delivered');
+    if (activeOrder.receiver_id) pushTo([activeOrder.receiver_id], '🎉 Your Package Arrived!', `Your package has been delivered. Please confirm receipt in the app.`, 'delivered');
     setRouteToSender(null); setRouteToReceiver(null);
     notify('🎉 Marked as delivered! Waiting for sender to confirm.');
     loadDriverData();
