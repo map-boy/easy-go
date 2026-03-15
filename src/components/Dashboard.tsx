@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { HomeTab }        from './tabs/HomeTab';
 import { SenderOrderTab } from './tabs/SenderOrderTab';
@@ -32,14 +32,19 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
   const { profile: realProfile } = useAuth();
   const profile = demo ? DEMO_PROFILE : realProfile;
 
-  const [activeTab, setActiveTab] = useState<TabType>('order');
-  const LOCKED_TABS_DEMO: TabType[] = ['order', 'profile'];
+  const [activeTab, setActiveTab] = useState<TabType>('home');
+  const LOCKED_TABS_DEMO: TabType[] = ['profile'];
   const [showDemoLock, setShowDemoLock] = useState(false);
-
-
 
   const isDriver   = profile?.user_category === 'motari'   || profile?.role === 'driver';
   const isReceiver = profile?.user_category === 'receiver' || profile?.role === 'receiver';
+
+  // Set correct default tab based on role when profile loads
+  useEffect(() => {
+    if (demo)            setActiveTab('home');
+    else if (isReceiver) setActiveTab('order');
+    else                 setActiveTab('home');
+  }, [demo, isDriver, isReceiver]);
 
   // Receiver: Order / My Parcels / Profile  (no Home tab)
   const tabs = isReceiver ? [
