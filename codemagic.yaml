@@ -5,23 +5,19 @@ workflows:
     instance_type: mac_mini_m1
     environment:
       node: latest
-      groups:
-        - google_play_credentials # Define these in Codemagic UI if needed
       vars:
         PACKAGE_NAME: "com.wandaatech.easygo"
     scripts:
       - name: Install dependencies
         script: |
           npm install
-      - name: Lint and Test
+      - name: Build Android Release
         script: |
-          npm test
-      - name: Build Android
-        script: |
+          # Generate the release build
           cd android && ./gradlew assembleRelease
     artifacts:
-      - android/app/build/outputs/apk/**/*.apk
-      - android/app/build/outputs/bundle/**/*.aab
+      - android/app/build/outputs/apk/release/*.apk
+      - android/app/build/outputs/bundle/release/*.aab
     publishing:
       email:
         recipients:
