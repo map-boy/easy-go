@@ -1,23 +1,24 @@
 workflows:
   react-native-android:
-    name: React Native Android Build
+    name: Easy Go Android Build
     max_build_duration: 60
     instance_type: mac_mini_m1
     environment:
-      node: latest
-      vars:
-        PACKAGE_NAME: "com.wandaatech.easygo"
+      node: 20 # Using a stable long-term support version
     scripts:
       - name: Install dependencies
         script: |
           npm install
+      - name: Prebuild Android
+        script: |
+          # This command creates the 'android' folder that was missing
+          npx expo prebuild --platform android --non-interactive
       - name: Build Android Release
         script: |
-          # Generate the release build
+          # Now that the folder exists, we can enter it and build
           cd android && ./gradlew assembleRelease
     artifacts:
       - android/app/build/outputs/apk/release/*.apk
-      - android/app/build/outputs/bundle/release/*.aab
     publishing:
       email:
         recipients:
