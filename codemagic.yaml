@@ -4,18 +4,21 @@ workflows:
     max_build_duration: 60
     instance_type: mac_mini_m1
     environment:
-      node: 20 # Using a stable long-term support version
+      node: 20
+      vars:
+        CI: 1 # This replaces the --non-interactive flag
     scripts:
       - name: Install dependencies
         script: |
           npm install
+          # Explicitly install expo if it's missing from node_modules
+          npm install expo
       - name: Prebuild Android
         script: |
-          # This command creates the 'android' folder that was missing
-          npx expo prebuild --platform android --non-interactive
+          # Use npx to ensure we use the local project's expo version
+          npx expo prebuild --platform android
       - name: Build Android Release
         script: |
-          # Now that the folder exists, we can enter it and build
           cd android && ./gradlew assembleRelease
     artifacts:
       - android/app/build/outputs/apk/release/*.apk
