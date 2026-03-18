@@ -147,6 +147,7 @@ export function Auth({ onBack, onDemo }: AuthProps) {
 
   // Location autocomplete
   const [locationSuggestions, setLocationSuggestions] = useState<any[]>([]);
+  const [detectedSector,      setDetectedSector]      = useState('');
   const [showLocationDrop,    setShowLocationDrop]     = useState(false);
   const [locationLoading,     setLocationLoading]      = useState(false);
   const locationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -179,6 +180,7 @@ export function Auth({ onBack, onDemo }: AuthProps) {
 
   function handleLocationChange(val: string) {
     setFormData(f => ({ ...f, location: val }));
+    setDetectedSector('');
     setLocationErr('');
     if (locationTimer.current) clearTimeout(locationTimer.current);
     if (!val.trim() || val.length < 3) { setLocationSuggestions([]); setShowLocationDrop(false); return; }
@@ -190,6 +192,7 @@ export function Auth({ onBack, onDemo }: AuthProps) {
         const d   = await res.json();
         const formatted = (d.features || []).map((f: any) => ({
           display: [f.properties.name, f.properties.street, f.properties.city || 'Kigali'].filter(Boolean).join(', '),
+          sector:  f.properties.suburb || f.properties.quarter || f.properties.city_district || f.properties.district || '',
         }));
         setLocationSuggestions(formatted);
         setShowLocationDrop(formatted.length > 0);
@@ -257,6 +260,7 @@ export function Auth({ onBack, onDemo }: AuthProps) {
         phone_number:  fullPhone,
         district:      validDistrict,
         location:      formData.location,
+        sector:        detectedSector || '',
         user_category: formData.user_category,
         role:          formData.user_category === 'motari' ? 'driver' : 'sender',
       });
@@ -429,11 +433,21 @@ export function Auth({ onBack, onDemo }: AuthProps) {
                     {locationLoading && <div className="spinner" style={{ position: 'absolute', right: '11px', top: '50%', transform: 'translateY(-50%)', width: '13px', height: '13px' }} />}
                   </div>
                   {locationErr && <p style={{ fontSize: '11px', color: '#ef4444', marginTop: '4px' }}>⚠️ {locationErr}</p>}
+                  {/* Auto-detected sector badge */}
+                  {detectedSector && !locationErr && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', padding: '5px 10px', background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '8px' }}>
+                      <span style={{ fontSize: '12px' }}>✅</span>
+                      <p style={{ fontSize: '11px', color: '#22c55e', fontWeight: 600 }}>Neighbourhood detected: <strong>{detectedSector}</strong></p>
+                    </div>
+                  )}
+                  {!detectedSector && formData.location.length > 3 && !locationErr && (
+                    <p style={{ fontSize: '11px', color: '#5a6a80', marginTop: '4px' }}>💡 Pick a suggestion from the list to auto-detect your area</p>
+                  )}
                   {showLocationDrop && locationSuggestions.length > 0 && (
                     <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 9999, background: '#0f1923', border: '1px solid #1e2a3a', borderRadius: '10px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)', maxHeight: '200px', overflowY: 'auto' }}>
                       {locationSuggestions.map((s, i) => (
                         <div key={i}
-                          onClick={() => { setFormData(f => ({ ...f, location: s.display })); setShowLocationDrop(false); setLocationErr(''); }}
+                          onClick={() => { setFormData(f => ({ ...f, location: s.display })); setDetectedSector(s.sector || ''); setShowLocationDrop(false); setLocationErr(''); }}
                           style={{ padding: '10px 14px', cursor: 'pointer', fontSize: '12px', color: '#e8edf5', borderBottom: '1px solid #1e2a3a', display: 'flex', alignItems: 'center', gap: '8px' }}
                           onMouseEnter={e => (e.currentTarget.style.background = '#1e2a3a')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}

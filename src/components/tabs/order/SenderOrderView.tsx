@@ -12,7 +12,8 @@ import {
 import { supabase } from '../../../lib/supabase';
 import { Star } from 'lucide-react';
 import { useAuth } from '../../../contexts/AuthContext';
-import { predictPrice, isRushHour, haversineKm } from '../../../lib/pricePredictor';
+import { isRushHour, haversineKm } from '../../../lib/pricePredictor';
+import { lookupPrice, isOfflineRushHour } from '../../../lib/kigaliPricing';
 
 const RWANDA_DISTRICTS = [
   'Gasabo','Kicukiro','Nyarugenge',
@@ -153,9 +154,10 @@ function DistrictInput({ value, onChange, error }: { value: string; onChange: (v
   );
 }
 
-function LocationInput({ value, onChange, district, onValidated, error, setError }: {
+function LocationInput({ value, onChange, district, onValidated, onSectorDetected, error, setError }: {
   value: string; onChange: (v: string) => void; district: string;
   onValidated: (lat: number, lng: number, display: string) => void;
+  onSectorDetected?: (sector: string) => void;
   error?: string | null; setError: (e: string | null) => void;
 }) {
   const [suggestions, setSuggestions] = useState<any[]>([]);
@@ -183,7 +185,8 @@ function LocationInput({ value, onChange, district, onValidated, error, setError
           lat: String(f.geometry.coordinates[1]),
           lon: String(f.geometry.coordinates[0]),
           display_name: [f.properties.name, f.properties.street, f.properties.city || 'Kigali', 'Rwanda'].filter(Boolean).join(', '),
-          address: { road: f.properties.street || f.properties.name, suburb: f.properties.district, city: f.properties.city || 'Kigali', city_district: f.properties.district }
+          address: { road: f.properties.street || f.properties.name, suburb: f.properties.district, city: f.properties.city || 'Kigali', city_district: f.properties.district },
+          sector: f.properties.suburb || f.properties.quarter || f.properties.city_district || f.properties.district || '',
         }));
         setSuggestions(formatted); setShow(formatted.length > 0);
       } catch { setSuggestions([]); }
@@ -213,7 +216,7 @@ function LocationInput({ value, onChange, district, onValidated, error, setError
             {suggestions.map((place, i) => {
               const label = formatSuggestion(place);
               return (
-                <div key={i} onMouseDown={() => { onValidated(parseFloat(place.lat), parseFloat(place.lon), label); setPinned(true); setError(null); setShow(false); }}
+                <div key={i} onMouseDown={() => { onValidated(parseFloat(place.lat), parseFloat(place.lon), label); if (place.sector && onSectorDetected) onSectorDetected(place.sector); setPinned(true); setError(null); setShow(false); }}
                   style={{ padding: '9px 14px', cursor: 'pointer', borderBottom: '1px solid var(--border)', background: 'transparent' }}
                   onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--bg3)'}
                   onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}>
@@ -227,6 +230,9 @@ function LocationInput({ value, onChange, district, onValidated, error, setError
       </div>
       {error  && <p style={{ fontSize: '11px', color: 'var(--red)',   marginTop: '5px' }}>⚠️ {error}</p>}
       {pinned && <p style={{ fontSize: '11px', color: 'var(--green)', marginTop: '5px' }}>✓ Location pinned on map</p>}
+      {!pinned && value.length > 3 && !error && (
+        <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px' }}>💡 Pick from the list to auto-detect your neighbourhood</p>
+      )}
     </div>
   );
 }
@@ -245,6 +251,8 @@ export function SenderOrderView({ onPriceRequest }: {
   const [manualName,       setManualName]       = useState('');
   const [manualDistrict,   setManualDistrict]   = useState('');
   const [manualLocation,   setManualLocation]   = useState('');
+  const [manualSector,     setManualSector]     = useState('');  // auto-detected from Photon
+  const [receiverSector,   setReceiverSector]   = useState('');
   const [manualLocCoords,  setManualLocCoords]  = useState<{ lat: number; lng: number } | null>(null);
   const [phoneErr,         setPhoneErr]         = useState<string | null>(null);
   const [districtErr,      setDistrictErr]      = useState<string | null>(null);
@@ -361,13 +369,53 @@ export function SenderOrderView({ onPriceRequest }: {
 
   const allFilled = receiverReady && !!packageWeight;
 
-  useEffect(() => {
-    if (allFilled) calculatePrice();
-    else { setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null); }
-  }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat, packageSize, weatherCond, roadCond, isFragile, deliverySpeed]);
+  // ── Build rich location strings: street + Photon sector + district ───────────
+  // sector is auto-detected from Photon when user picks a suggestion — no manual input
+  const receiverLocText = receiverHasApp
+    ? [selectedReceiver?.location, (selectedReceiver as any)?.sector, selectedReceiver?.district].filter(Boolean).join(' ')
+    : [manualLocation, manualSector, manualDistrict].filter(Boolean).join(' ');
+  const senderLocText = [
+    (profile as any)?.location,
+    (profile as any)?.sector,   // saved at signup via Photon detection
+    (profile as any)?.district,
+  ].filter(Boolean).join(' ');
 
-  async function calculatePrice() {
-    setPriceLoading(true); setPriceReady(false);
+  // ── Price from zone table — instant, no network, no map needed ───────────────
+  useEffect(() => {
+    if (!receiverLocText.trim() || !senderLocText.trim()) {
+      setPredictedPrice(0); setPriceReady(false); setBreakdown(null);
+      return;
+    }
+    const result = lookupPrice({
+      senderLocation:   senderLocText,
+      receiverLocation: receiverLocText,
+      packageSize:      packageSize as any,
+      isRushHour:       isOfflineRushHour(),
+      isRaining:        weatherCond === 'rain',
+      poorRoads:        roadCond === 'poor',
+      isRapid:          deliverySpeed === 'rapid',
+    });
+    if (result) {
+      setPredictedPrice(result.priceRwf);
+      setBreakdown({
+        fromZone:    result.fromZone,
+        toZone:      result.toZone,
+        distKm:      result.distKm,
+        multipliers: result.multipliers,
+        confidence:  result.confidence,
+        source:      result.source,
+      });
+      setPriceReady(true);
+    }
+  }, [receiverLocText, senderLocText, packageSize, weatherCond, roadCond, deliverySpeed, selectedReceiver?.id]);
+
+  // ── allFilled → fetch route for km/time display only (never used for price) ──
+  useEffect(() => {
+    if (allFilled) fetchRouteDisplay();
+    else setRouteKm(null);
+  }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat]);
+
+  async function fetchRouteDisplay() {
     try {
       const { data: drivers } = await supabase.from('drivers').select('latitude,longitude').eq('is_on_duty', true).eq('is_available', true).not('latitude', 'is', null);
       let distD2S = 2.0;
@@ -379,34 +427,18 @@ export function SenderOrderView({ onPriceRequest }: {
         }, null);
         if (closest) distD2S = await getRoadKm([closest.latitude, closest.longitude], senderPos);
       }
-      let distS2R = 5.0;
+      let distS2R = breakdown?.distKm ?? 5.0;
       if (receiverHasApp && selectedReceiver?.id) {
         const { data: rp } = await supabase.from('profiles').select('latitude,longitude').eq('id', selectedReceiver.id).maybeSingle();
         if (rp?.latitude && rp?.longitude) distS2R = await getRoadKm(senderPos, [rp.latitude, rp.longitude]);
       } else if (!receiverHasApp && manualLocCoords) {
         distS2R = await getRoadKm(senderPos, [manualLocCoords.lat, manualLocCoords.lng]);
       }
-      const rush = isRushHour(); const badWx = weatherCond === 'rain'; const badRoads = roadCond === 'poor';
-      const safeD2S = Math.min(Math.max(distD2S, 0.5), 50);
-      const safeS2R = Math.min(Math.max(distS2R, 0.5), 50);
-      setRouteKm({ d2s: safeD2S, s2r: safeS2R });
-      let base = 0;
-      if (onPriceRequest) {
-        base = (await onPriceRequest({ dist_to_sender: safeD2S, dist_to_receiver: safeS2R, is_rush_hour: rush ? 1 : 0, bad_weather: badWx ? 1 : 0, bad_roads: badRoads ? 1 : 0 })) ?? 0;
-      } else {
-        const r = predictPrice({ distDriverToSender: safeD2S, distSenderToReceiver: safeS2R, isRushHour: rush, badWeather: badWx, badRoads });
-        base = r.totalFrw;
-        setBreakdown({ distD2S: safeD2S, distS2R: safeS2R, isHarsh: r.breakdown.isHarsh, rate1: r.breakdown.rate1PerKm, rate2: r.breakdown.rate2PerKm });
-      }
-      let final = base;
-      if (packageSize === 'large') final = Math.round(final * 1.3);
-      if (packageSize === 'small') final = Math.round(final * 0.8);
-      if (roadCond === 'moderate') final = Math.round(final * 1.1);
-      if (deliverySpeed === 'rapid') final = Math.round(final * 1.2);
-      setPredictedPrice(Math.max(final, 1500)); setPriceReady(true);
-    } catch (err) {
-      console.error(err); setPredictedPrice(3500); setPriceReady(true);
-    } finally { setPriceLoading(false); }
+      setRouteKm({
+        d2s: Math.min(Math.max(distD2S, 0.5), 50),
+        s2r: Math.min(Math.max(distS2R, 0.5), 50),
+      });
+    } catch { /* route display optional — price unaffected */ }
   }
 
   async function submitReview() {
@@ -641,7 +673,7 @@ export function SenderOrderView({ onPriceRequest }: {
             </div>
             <PhoneInput label="Phone Number" value={manualPhone} onChange={v => { setManualPhone(v); setPhoneErr(validatePhone(v.code, v.number)); }} error={phoneErr} />
             <DistrictInput value={manualDistrict} onChange={v => { setManualDistrict(v); setDistrictErr(validateDistrict(v)); }} error={districtErr} />
-            <LocationInput value={manualLocation} onChange={setManualLocation} district={manualDistrict}
+            <LocationInput value={manualLocation} onChange={v => { setManualLocation(v); setManualSector(''); }} district={manualDistrict} onSectorDetected={setManualSector}
               onValidated={(lat, lng, display) => { setManualLocCoords({ lat, lng }); setManualLocation(display); }}
               error={locationErr} setError={setLocationErr} />
             {manualLocCoords && (
@@ -804,41 +836,57 @@ export function SenderOrderView({ onPriceRequest }: {
       ) : (
         <div style={{ background: 'var(--yellow-dim)', border: '1px solid rgba(245,197,24,0.25)', borderRadius: '14px', padding: '20px', textAlign: 'center' }}>
           <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 600 }}>AI Predicted Price</p>
-          {priceLoading ? (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '10px 0' }}>
-              <div className="spinner" /><p style={{ fontSize: '13px', color: 'var(--text3)' }}>Calculating road distance…</p>
-            </div>
-          ) : (
-            <>
-              <p style={{ fontWeight: 700, fontSize: '36px', color: 'var(--yellow)', letterSpacing: '-.02em', marginBottom: '4px' }}>{predictedPrice.toLocaleString()} <span style={{ fontSize: '16px' }}>RWF</span></p>
-              <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: breakdown ? '12px' : 0 }}>🤖 ML model · real road km · conditions applied</p>
-              {breakdown && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px' }}>
-                  <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: '8px', padding: '8px' }}>
-                    <p style={{ fontSize: '9px', color: '#92400e', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Driver→Sender</p>
-                    <p style={{ fontSize: '14px', fontWeight: 800, color: '#f59e0b' }}>{breakdown.distD2S.toFixed(1)} km</p>
-                    <p style={{ fontSize: '10px', color: '#78350f' }}>{breakdown.rate1} RWF/km</p>
-                  </div>
-                  <div style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '8px', padding: '8px' }}>
-                    <p style={{ fontSize: '9px', color: '#166534', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Sender→Receiver</p>
-                    <p style={{ fontSize: '14px', fontWeight: 800, color: '#22c55e' }}>{breakdown.distS2R.toFixed(1)} km</p>
-                    <p style={{ fontSize: '10px', color: '#14532d' }}>{breakdown.rate2} RWF/km</p>
-                  </div>
-                  <div style={{ gridColumn: 'span 2', background: breakdown.isHarsh ? 'rgba(239,68,68,0.08)' : 'rgba(34,197,94,0.08)', border: `1px solid ${breakdown.isHarsh ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}`, borderRadius: '8px', padding: '8px' }}>
-                    <p style={{ fontSize: '12px', fontWeight: 700, color: breakdown.isHarsh ? 'var(--red)' : 'var(--green)' }}>{breakdown.isHarsh ? '⚡ Surge pricing active' : '✅ Normal pricing'}</p>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
+          <>
+            {/* Big price */}
+            <p style={{ fontWeight: 900, fontSize: '38px', color: 'var(--yellow)', letterSpacing: '-.02em', marginBottom: '4px' }}>
+              {predictedPrice.toLocaleString()} <span style={{ fontSize: '16px', fontWeight: 600, opacity: 0.6 }}>RWF</span>
+            </p>
+
+            {/* Zone route */}
+            {breakdown?.fromZone && (
+              <p style={{ fontSize: '13px', color: 'var(--text3)', marginBottom: '8px' }}>
+                📍 {breakdown.fromZone} → {breakdown.toZone}
+                {breakdown.distKm ? <span style={{ marginLeft: '6px' }}>· ~{breakdown.distKm}km</span> : null}
+              </p>
+            )}
+
+            {/* Confidence badge */}
+            {breakdown?.confidence && (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '3px 10px', borderRadius: '20px', marginBottom: '10px',
+                background: breakdown.confidence === 'exact' ? 'rgba(34,197,94,0.08)' : breakdown.confidence === 'near' ? 'rgba(245,197,24,0.08)' : 'rgba(249,115,22,0.08)',
+                border: `1px solid ${breakdown.confidence === 'exact' ? 'rgba(34,197,94,0.25)' : breakdown.confidence === 'near' ? 'rgba(245,197,24,0.25)' : 'rgba(249,115,22,0.25)'}`,
+              }}>
+                <span style={{ fontSize: '11px', fontWeight: 700,
+                  color: breakdown.confidence === 'exact' ? 'var(--green)' : breakdown.confidence === 'near' ? 'var(--yellow)' : '#f97316',
+                }}>
+                  {breakdown.confidence === 'exact' ? '✅ Zone matched' : breakdown.confidence === 'near' ? '🟡 Approx match' : '🟠 Estimated — add neighbourhood for better price'}
+                </span>
+              </div>
+            )}
+
+            {/* Active multipliers */}
+            {breakdown?.multipliers?.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', justifyContent: 'center', marginBottom: '8px' }}>
+                {breakdown.multipliers.map((m: string, i: number) => (
+                  <span key={i} style={{ fontSize: '11px', fontWeight: 600, padding: '3px 8px', borderRadius: '8px', background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.2)', color: 'var(--yellow)' }}>
+                    {m}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <p style={{ fontSize: '10px', color: 'var(--text3)', opacity: 0.6 }}>
+              🗺️ Fixed zone price · map shows km only
+            </p>
+          </>
         </div>
       )}
 
       <button type="submit" className="btn-yellow"
-        disabled={loading || priceLoading || !priceReady || walletBalance < predictedPrice}
+        disabled={loading || !priceReady || walletBalance < predictedPrice}
         style={{ fontSize: '15px', padding: '13px' }}>
         {loading          ? '⏳ Placing order…' :
-         !priceReady      ? 'Fill all fields first' :
+         !priceReady      ? 'Enter locations to see price' :
          walletBalance < predictedPrice ? `⚠️ Top up wallet — need ${predictedPrice.toLocaleString()} RWF` :
          `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF from Wallet`}
       </button>
