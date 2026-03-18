@@ -1,28 +1,70 @@
 workflows:
-  react-native-android:
-    name: Easy Go Android Build
+  easy-go-android:
+    name: Easy GO Android APK
     max_build_duration: 60
-    instance_type: mac_mini_m1
     environment:
-      node: 20
+      node: 18.17.0
       vars:
-        CI: 1 # This replaces the --non-interactive flag
+        PACKAGE_NAME: "com.easygo.rwanda"
+        APP_NAME: "Easy GO"
+
     scripts:
+      # ── 1. Install dependencies ────────────────────────────────────────────
       - name: Install dependencies
+        script: npm install
+
+      # ── 2. Build the web app ───────────────────────────────────────────────
+      - name: Build Vite app
+        script: npm run build
+
+      # ── 3. Install Capacitor ───────────────────────────────────────────────
+      - name: Install Capacitor
         script: |
-          npm install
-          # Explicitly install expo if it's missing from node_modules
-          npm install expo
-      - name: Prebuild Android
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+
+      # ── 4. Init Capacitor (skip if already initialised) ───────────────────
+      - name: Init Capacitor
         script: |
-          # Use npx to ensure we use the local project's expo version
-          npx expo prebuild --platform android
-      - name: Build Android Release
+          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ]; then
+            npx cap init "$APP_NAME" "$PACKAGE_NAME" --web-dir dist
+          else
+            echo "Capacitor already initialised — skipping"
+          fi
+
+      # ── 5. Add Android platform ────────────────────────────────────────────
+      - name: Add Android platform
         script: |
-          cd android && ./gradlew assembleRelease
+          if [ ! -d "android" ]; then
+            npx cap add android
+          else
+            echo "Android platform already exists — syncing"
+          fi
+          npx cap sync android
+
+      # ── 6. Set app name and version in Android manifest ───────────────────
+      - name: Configure Android manifest
+        script: |
+          # Set internet permission (required for Supabase + maps)
+          if ! grep -q "INTERNET" android/app/src/main/AndroidManifest.xml; then
+            sed -i 's|</manifest>|    <uses-permission android:name="android.permission.INTERNET" />\n</manifest>|' android/app/src/main/AndroidManifest.xml
+          fi
+          # Allow cleartext (needed for some map tiles)
+          sed -i 's/android:label="@string\/app_name"/android:label="@string\/app_name" android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml || true
+
+      # ── 7. Build debug APK ─────────────────────────────────────────────────
+      - name: Build Android APK
+        script: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
     artifacts:
-      - android/app/build/outputs/apk/release/*.apk
+      - android/app/build/outputs/apk/debug/app-debug.apk
+
     publishing:
       email:
         recipients:
           - umwemubi@gmail.com
+        notify:
+          success: true
+          failure: true
