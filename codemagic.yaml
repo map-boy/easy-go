@@ -10,66 +10,44 @@ workflows:
         APP_NAME: "Easy GO"
 
     scripts:
-      # ── 1. Install dependencies ────────────────────────────────────────────
       - name: Install dependencies
         script: npm install
 
-      # ── 2. Build the web app ───────────────────────────────────────────────
       - name: Build Vite app
         script: npm run build
 
-      # ── 3. Install Capacitor ───────────────────────────────────────────────
       - name: Install Capacitor
-        script: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
+        script: npm install @capacitor/core @capacitor/cli @capacitor/android
 
-      # ── 4. Init Capacitor ─────────────────────────────────────────────────
       - name: Init Capacitor
         script: |
           if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ]; then
             npx cap init "$APP_NAME" "$PACKAGE_NAME" --web-dir dist
           else
-            echo "Capacitor already initialised — skipping"
+            echo "Capacitor already initialised"
           fi
 
-      # ── 5. Add Android platform ────────────────────────────────────────────
       - name: Add Android platform
         script: |
           if [ ! -d "android" ]; then
             npx cap add android
           else
-            echo "Android platform already exists — syncing"
+            echo "Android already exists"
           fi
           npx cap sync android
 
-      # ── 6. Configure Android manifest ─────────────────────────────────────
       - name: Configure Android manifest
         script: |
           if ! grep -q "INTERNET" android/app/src/main/AndroidManifest.xml; then
-            sed -i 's|</manifest>|    <uses-permission android:name="android.permission.INTERNET" />\n</manifest>|' android/app/src/main/AndroidManifest.xml
+            sed -i 's|</manifest>|<uses-permission android:name="android.permission.INTERNET"/>\n</manifest>|' android/app/src/main/AndroidManifest.xml
           fi
-          sed -i 's/android:label="@string\/app_name"/android:label="@string\/app_name" android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml || true
 
-      # ── 7. Fix Java 21 compatibility ──────────────────────────────────────
-      - name: Fix Java compatibility
+      - name: Fix Java 21 compatibility
         script: |
-          cat >> android/build.gradle << 'GRADLE'
-
-subprojects {
-    afterEvaluate { project ->
-        if (project.hasProperty('android')) {
-            project.android.compileOptions {
-                sourceCompatibility JavaVersion.VERSION_21
-                targetCompatibility JavaVersion.VERSION_21
-            }
-        }
-    }
-}
-GRADLE
+          printf '\nsubprojects { afterEvaluate { project -> if (project.hasProperty("android")) { project.android.compileOptions { sourceCompatibility JavaVersion.VERSION_21; targetCompatibility JavaVersion.VERSION_21 } } } }\n' >> android/build.gradle
           echo "org.gradle.java.home=$JAVA_HOME" >> android/gradle.properties
           echo "android.useAndroidX=true" >> android/gradle.properties
 
-      # ── 8. Build debug APK ─────────────────────────────────────────────────
       - name: Build Android APK
         script: |
           cd android
