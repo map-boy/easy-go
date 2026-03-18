@@ -3,7 +3,7 @@ workflows:
     name: Easy GO Android APK
     max_build_duration: 60
     environment:
-      node: 18.17.0
+      node: 22.11.0
       vars:
         PACKAGE_NAME: "com.easygo.rwanda"
         APP_NAME: "Easy GO"
