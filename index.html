@@ -2,14 +2,26 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Easy GO Delivery App</title>
+    <link rel="icon" type="image/svg+xml" href="./vite.svg" />
+
+    <!-- Mobile viewport — essential for Android WebView -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+
+    <!-- Prevent phone number detection messing up UI -->
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- PWA / Android chrome -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0a0a0a" />
+
+    <title>Easy GO</title>
     <meta property="og:title" content="Easy GO - Your Delivery is Our Duty" />
     <meta property="og:description" content="Fast, reliable package delivery across Kigali" />
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>

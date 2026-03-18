@@ -4,22 +4,30 @@
   "webDir": "dist",
   "server": {
     "androidScheme": "https",
-    "cleartext": true
+    "cleartext": true,
+    "allowNavigation": [
+      "*.supabase.co",
+      "*.openstreetmap.org",
+      "*.tile.openstreetmap.org",
+      "*.arcgisonline.com",
+      "*.cartocdn.com",
+      "*.project-osrm.org",
+      "photon.komoot.io",
+      "*.mtn.com"
+    ]
   },
   "plugins": {
     "SplashScreen": {
       "launchShowDuration": 2000,
       "backgroundColor": "#0a0a0a",
-      "androidSplashResourceName": "splash",
-      "showSpinner": false
-    },
-    "StatusBar": {
-      "style": "DARK",
-      "backgroundColor": "#0a0a0a"
+      "showSpinner": false,
+      "splashFullScreen": true,
+      "splashImmersive": true
     }
   },
   "android": {
     "allowMixedContent": true,
-    "backgroundColor": "#0a0a0a"
+    "backgroundColor": "#0a0a0a",
+    "appendUserAgent": "EasyGO-Android"
   }
 }
