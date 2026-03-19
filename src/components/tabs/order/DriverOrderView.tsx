@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle, Clock, Package, Phone, ShoppingBag } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
-import { useAuth } from '../../contexts/AuthContext';
+import { supabase } from '../../../lib/supabase';
+import { useAuth } from '../../../contexts/AuthContext';
 
 // ── DriverOrderView ───────────────────────────────────────────────────────────
 // Handles all SHOP / FOOD orders for the driver.

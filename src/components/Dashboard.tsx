@@ -5,7 +5,7 @@ import { SenderOrderTab } from './tabs/SenderOrderTab';
 import { TrackTab }       from './tabs/TrackTab';
 import { ProfileTab }     from './tabs/ProfileTab';
 import { DriverTab }      from './tabs/DriverTab';
-import { DriverShopTab } from './tabs/DriverShopTab';
+import { DriverOrderView } from './tabs/order/DriverOrderView';
 import { ReceiverTab }    from './tabs/ReceiverTab';
 import { MyParcelTab }    from './tabs/MyParcelTab';
 import { useAuth }        from '../contexts/AuthContext';
@@ -84,7 +84,7 @@ export function Dashboard({ demo = false, onExitDemo }: DashboardProps) {
       if (isDriver)   return <DriverTab />;
       return <SenderOrderTab />;
     }
-    if (activeTab === 'shop') return <DriverShopTab />;
+    if (activeTab === 'shop') return <DriverOrderView />;
     if (activeTab === 'home') return <HomeTab />;
     return null;
   }

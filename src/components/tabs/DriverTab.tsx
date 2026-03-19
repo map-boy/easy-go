@@ -37,6 +37,8 @@ export function DriverTab() {
   const [walletBalance,  setWalletBalance]  = useState(0);
   const [walletTxs,      setWalletTxs]      = useState<any[]>([]);
   const [showWallet,     setShowWallet]      = useState(false);
+  const [totalEarned,    setTotalEarned]    = useState(0);
+  const [completedTrips, setCompletedTrips] = useState(0);
   const [withdrawStep,   setWithdrawStep]   = useState<'idle'|'confirm'|'processing'|'done'|'error'>('idle');
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawPhone,  setWithdrawPhone]  = useState('');
@@ -46,9 +48,12 @@ export function DriverTab() {
     loadDriverData();
     startGPS();
     const channel = supabase.channel('driver-orders')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' },     () => loadPendingOrders())
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' },     () => { loadPendingOrders(); loadDriverData(); })
-
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'orders' },
+          () => loadPendingOrders())
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders' },
+          () => { loadPendingOrders(); loadDriverData(); })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'wallet_transactions' },
+          () => loadDriverData())   // ← refresh earnings when payment arrives
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [profile]);
@@ -82,12 +87,24 @@ export function DriverTab() {
         .limit(1)
         .maybeSingle();
       setActiveOrder(active || null);
-      // load wallet
-      const { data: prof } = await supabase.from('profiles').select('wallet_balance, phone_number').eq('id', profile.id).single();
-      setWalletBalance(prof?.wallet_balance ?? 0);
-      setWithdrawPhone(prof?.phone_number ?? '');
-      const { data: txs } = await supabase.from('wallet_transactions').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }).limit(10);
-      setWalletTxs(txs || []);
+    }
+    // Load wallet ALWAYS — regardless of driver record state
+    const { data: prof } = await supabase.from('profiles').select('wallet_balance, phone_number').eq('id', profile.id).single();
+    setWalletBalance(prof?.wallet_balance ?? 0);
+    setWithdrawPhone(prof?.phone_number ?? '');
+    const { data: txs } = await supabase.from('wallet_transactions').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }).limit(20);
+    setWalletTxs(txs || []);
+    // Calculate total earned and completed trips from transaction history
+    const earned = (txs || []).filter((t: any) => t.type === 'topup').reduce((s: number, t: any) => s + (t.amount || 0), 0);
+    setTotalEarned(earned);
+    // Count completed deliveries from orders table
+    if (driver?.id) {
+      const { data: doneOrders } = await supabase
+        .from('orders')
+        .select('id')
+        .eq('driver_id', driver.id)
+        .eq('status', 'delivered');
+      setCompletedTrips(doneOrders?.length ?? 0);
     }
     await loadPendingOrders();
     setLoading(false);
@@ -130,15 +147,6 @@ export function DriverTab() {
     notify(newDuty ? '✅ You are now ON DUTY — orders will appear' : '🔴 You are OFF DUTY');
   }
 
-  // ── Push notification helper ─────────────────────────────────────────────
-  function pushTo(userIds: (string|null|undefined)[], title: string, body: string, tag = 'order') {
-    const ids = userIds.filter(Boolean) as string[];
-    if (!ids.length) return;
-    supabase.functions.invoke('send-push', {
-      body: { user_ids: ids, title, body, url: '/', tag },
-    }).catch(() => {});
-  }
-
   async function acceptOrder(order: any) {
     if (!driverInfo) return;
     setAcceptingId(order.id);
@@ -154,9 +162,6 @@ export function DriverTab() {
       await createNotification(order.receiver_id, '📦 Your Package is Coming!',
         `A driver has accepted delivery to ${order.receiver_location}`, 'order_accepted', order.id);
     }
-    // Push notifications
-    pushTo([order.sender_id], '🏍️ Driver Accepted Your Order!', `Driver is on the way to pick up from ${order.sender_location}`, 'order-accepted');
-    if (order.receiver_id) pushTo([order.receiver_id], '📦 Your Package is Coming!', `A driver accepted delivery to ${order.receiver_location}`, 'order-accepted');
     notify('✅ Order accepted! Navigate to pickup.');
     loadDriverData();
   }
@@ -170,14 +175,13 @@ export function DriverTab() {
       await createNotification(activeOrder.receiver_id, '🚀 Package In Transit!',
         `Your package is on its way — arriving at ${activeOrder.receiver_location}`, 'in_transit', activeOrder.id);
     }
-    pushTo([activeOrder.sender_id], '📦 Package Picked Up!', `Your package is now in transit to ${activeOrder.receiver_location}`, 'in-transit');
-    if (activeOrder.receiver_id) pushTo([activeOrder.receiver_id], '🚀 Package On The Way!', `Your package is heading to ${activeOrder.receiver_location}`, 'in-transit');
     notify('📦 Marked as picked up — in transit!');
     loadDriverData();
   }
 
   async function markDelivered() {
     if (!activeOrder) return;
+    // Mark as delivered — driver confirmed. Sender must still confirm.
     await supabase.from('orders').update({
       status: 'delivered', driver_confirmed: true, updated_at: new Date().toISOString(),
     }).eq('id', activeOrder.id);
@@ -187,8 +191,6 @@ export function DriverTab() {
       await createNotification(activeOrder.receiver_id, '🎉 Package Arrived!',
         `Your package has been delivered. Please confirm receipt.`, 'delivered', activeOrder.id);
     }
-    pushTo([activeOrder.sender_id], '✅ Package Delivered!', `Confirm receipt in the app to release driver payment`, 'delivered');
-    if (activeOrder.receiver_id) pushTo([activeOrder.receiver_id], '🎉 Your Package Arrived!', `Your package has been delivered. Please confirm receipt in the app.`, 'delivered');
     setRouteToSender(null); setRouteToReceiver(null);
     notify('🎉 Marked as delivered! Waiting for sender to confirm.');
     loadDriverData();
@@ -270,21 +272,54 @@ export function DriverTab() {
 
       <div style={{ padding: '16px' }}>
 
-        {/* ── WALLET CARD ── */}
+        {/* ── EARNINGS DASHBOARD ── */}
         <div style={{ background: 'linear-gradient(135deg, #0a0a0a 0%, #111c2e 100%)', border: '1px solid rgba(245,197,24,0.2)', borderRadius: '14px', padding: '16px', marginBottom: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Wallet size={15} color="#f5c518" />
-              <span style={{ fontWeight: 700, fontSize: '13px', color: '#fff' }}>My Wallet</span>
+              <span style={{ fontWeight: 700, fontSize: '13px', color: '#fff' }}>My Earnings</span>
             </div>
             <button onClick={() => setShowWallet(v => !v)} style={{ background: 'rgba(245,197,24,0.1)', border: '1px solid rgba(245,197,24,0.25)', borderRadius: '8px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 700, color: '#f5c518' }}>
-              {showWallet ? 'Hide' : 'Show'}
+              {showWallet ? 'Hide Details' : 'Show Details'}
             </button>
           </div>
-          <p style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: '28px', fontWeight: 900, color: '#fff', letterSpacing: '-.02em', marginBottom: '2px' }}>
-            {walletBalance.toLocaleString()} <span style={{ fontSize: '13px', fontWeight: 600, color: 'rgba(255,255,255,0.4)' }}>RWF</span>
-          </p>
-          <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.3)' }}>Available earnings</p>
+
+          {/* 3 stat boxes — always visible */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '14px' }}>
+            <div style={{ background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.15)', borderRadius: '10px', padding: '10px', textAlign: 'center' }}>
+              <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.35)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '4px' }}>Available</p>
+              <p style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: '17px', fontWeight: 900, color: '#f5c518', letterSpacing: '-.01em' }}>
+                {walletBalance.toLocaleString()}
+              </p>
+              <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.25)' }}>RWF</p>
+            </div>
+            <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.15)', borderRadius: '10px', padding: '10px', textAlign: 'center' }}>
+              <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.35)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '4px' }}>Total Earned</p>
+              <p style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: '17px', fontWeight: 900, color: '#22c55e', letterSpacing: '-.01em' }}>
+                {totalEarned.toLocaleString()}
+              </p>
+              <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.25)' }}>RWF</p>
+            </div>
+            <div style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.15)', borderRadius: '10px', padding: '10px', textAlign: 'center' }}>
+              <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.35)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '4px' }}>Deliveries</p>
+              <p style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: '17px', fontWeight: 900, color: '#3b82f6', letterSpacing: '-.01em' }}>
+                {completedTrips}
+              </p>
+              <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.25)' }}>trips</p>
+            </div>
+          </div>
+
+          {/* Average per trip */}
+          {completedTrips > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderRadius: '8px', marginBottom: '14px' }}>
+              <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>⚡ Avg per delivery</p>
+              <p style={{ fontSize: '13px', fontWeight: 800, color: '#f5c518' }}>
+                {Math.round(totalEarned / completedTrips).toLocaleString()} RWF
+              </p>
+            </div>
+          )}
 
           {showWallet && (
             <div style={{ marginTop: '14px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '14px' }}>
