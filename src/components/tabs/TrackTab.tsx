@@ -107,12 +107,16 @@ async function geocode(loc: string, district?: string): Promise<[number, number]
   if (!loc?.trim()) return null;
   try {
     const q   = encodeURIComponent([loc.trim(), district, 'Rwanda'].filter(Boolean).join(', '));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch(
-      `https://photon.komoot.io/api/?q=${q}&limit=1&bbox=28.8,-2.9,30.9,-1.0&lang=en`
+      `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1&viewbox=28.8,-1.0,30.9,-2.9&bounded=1&countrycodes=rw`,
+      { headers: { 'Accept-Language': 'en', 'User-Agent': 'easy-go-app' }, signal: controller.signal }
     );
+    clearTimeout(timeout);
     const d = await res.json();
-    const f = d.features?.[0];
-    return f ? [f.geometry.coordinates[1], f.geometry.coordinates[0]] : null;
+    const f = d?.[0];
+    return f ? [parseFloat(f.lat), parseFloat(f.lon)] : null;
   } catch { return null; }
 }
 
@@ -196,10 +200,16 @@ export function TrackTab() {
 
   async function reverseGeocode(lat: number, lng: number) {
     try {
-      const res  = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lng}&limit=1`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res  = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+        { headers: { 'Accept-Language': 'en', 'User-Agent': 'easy-go-app' }, signal: controller.signal }
+      );
+      clearTimeout(timeout);
       const data = await res.json();
-      const f = data.features?.[0]?.properties;
-      const parts = [f?.district || f?.suburb, f?.city || f?.town || 'Kigali'].filter(Boolean);
+      const a = data.address || {};
+      const parts = [a.suburb || a.neighbourhood || a.quarter, a.city || a.town || 'Kigali'].filter(Boolean);
       setLocationName(parts.join(', ') || 'Rwanda');
     } catch { setLocationName(`${lat.toFixed(4)}, ${lng.toFixed(4)}`); }
   }

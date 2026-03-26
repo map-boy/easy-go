@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+  <base-config cleartextTrafficPermitted="true">
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </base-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="true">tile.openstreetmap.org</domain>
+    <domain includeSubdomains="true">basemaps.cartocdn.com</domain>
+    <domain includeSubdomains="true">tile.opentopomap.org</domain>
+    <domain includeSubdomains="true">arcgisonline.com</domain>
+    <domain includeSubdomains="true">nominatim.openstreetmap.org</domain>
+    <domain includeSubdomains="true">unpkg.com</domain>
+  </domain-config>
+</network-security-config>

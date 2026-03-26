@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "240992619983",
+    "project_id": "easy-go-491116",
+    "storage_bucket": "easy-go-491116.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:240992619983:android:7ad72a3345f54c741556ba",
+        "android_client_info": {
+          "package_name": "com.easygo.rwanda"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDMd5nLRD3vLXQeYMKlaR8Bw4xPwttRdu0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

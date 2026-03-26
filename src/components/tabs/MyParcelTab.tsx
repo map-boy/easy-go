@@ -91,8 +91,11 @@ export function MyParcelTab() {
     return () => { supabase.removeChannel(ch); };
   }, [profile?.id]);
 
+  // ── FIX: Batched queries — N orders now costs 4 queries total, not N×3 ──
   async function loadOrders() {
     if (!profile) return;
+
+    // Step 1: fetch orders + food orders in parallel
     const [{ data }, { data: foodData }] = await Promise.all([
       supabase
         .from('orders')
@@ -106,32 +109,72 @@ export function MyParcelTab() {
         .order('created_at', { ascending: false }),
     ]);
 
-    // Tag food orders so we can render them differently
-    const taggedFood = (foodData || []).map((o: any) => ({ ...o, _type: 'food', predicted_price: o.total, sender_name: 'Easy GO Shop', sender_location: 'Kigali' }));
+    const taggedFood = (foodData || []).map((o: any) => ({
+      ...o,
+      _type: 'food',
+      predicted_price: o.total,
+      sender_name: 'Easy GO Shop',
+      sender_location: 'Kigali',
+    }));
 
-    const combined = [...(data || []), ...taggedFood].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    const rawData = combined;
+    const rawData = [...(data || []), ...taggedFood].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
 
     if (!rawData.length) { setOrders([]); setLoading(false); return; }
 
-    const enriched = await Promise.all(rawData.map(async (o: any) => {
-      // For regular orders: sender position from their profile
-      const senderProfileId = o._type === 'food' ? null : o.sender_id;
-      const { data: sp } = senderProfileId
-        ? await supabase.from('profiles').select('latitude,longitude').eq('id', senderProfileId).maybeSingle()
-        : { data: null };
-      // Receiver is always current user
-      const { data: rp } = await supabase.from('profiles').select('latitude,longitude').eq('id', profile.id).maybeSingle();
+    // Step 2: fetch receiver (current user) profile ONCE
+    const { data: rp } = await supabase
+      .from('profiles')
+      .select('latitude,longitude')
+      .eq('id', profile.id)
+      .maybeSingle();
 
-      // Driver info — food orders use driver_user_id, regular orders use drivers join
+    // Step 3: batch-fetch all unique sender profiles in ONE query
+    const senderIds = [
+      ...new Set(
+        rawData
+          .filter((o: any) => !o._type && o.sender_id)
+          .map((o: any) => o.sender_id as string)
+      ),
+    ];
+    const { data: senderProfiles } = senderIds.length
+      ? await supabase.from('profiles').select('id,latitude,longitude').in('id', senderIds)
+      : { data: [] as any[] };
+    const senderMap: Record<string, any> = Object.fromEntries(
+      (senderProfiles || []).map((p: any) => [p.id, p])
+    );
+
+    // Step 4: batch-fetch all unique food-order driver profiles in ONE query
+    const foodDriverIds = [
+      ...new Set(
+        rawData
+          .filter((o: any) => o._type === 'food' && o.driver_user_id)
+          .map((o: any) => o.driver_user_id as string)
+      ),
+    ];
+    const { data: driverProfiles } = foodDriverIds.length
+      ? await supabase
+          .from('profiles')
+          .select('id,latitude,longitude,full_name,phone_number')
+          .in('id', foodDriverIds)
+      : { data: [] as any[] };
+    const driverMap: Record<string, any> = Object.fromEntries(
+      (driverProfiles || []).map((p: any) => [p.id, p])
+    );
+
+    // Step 5: enrich synchronously — zero extra awaits
+    const enriched = rawData.map((o: any) => {
+      const sp = o._type === 'food' ? null : senderMap[o.sender_id];
+
       let driverLat = null, driverLng = null, driverName = null, driverPhone = null, driverPlate = null;
-      if (o._type === 'food') {
-        if (o.driver_user_id) {
-          const { data: dp } = await supabase.from('profiles').select('latitude,longitude,full_name,phone_number').eq('id', o.driver_user_id).maybeSingle();
-          driverLat = dp?.latitude; driverLng = dp?.longitude;
-          driverName = dp?.full_name; driverPhone = dp?.phone_number;
-          driverPlate = o.driver_plate;
-        }
+      if (o._type === 'food' && o.driver_user_id) {
+        const dp = driverMap[o.driver_user_id];
+        driverLat   = dp?.latitude;
+        driverLng   = dp?.longitude;
+        driverName  = dp?.full_name;
+        driverPhone = dp?.phone_number;
+        driverPlate = o.driver_plate;
       } else {
         driverLat   = o.drivers?.latitude;
         driverLng   = o.drivers?.longitude;
@@ -142,14 +185,17 @@ export function MyParcelTab() {
 
       return {
         ...o,
-        sender_lat:   sp?.latitude,   sender_lng:   sp?.longitude,
-        receiver_lat: rp?.latitude,   receiver_lng: rp?.longitude,
-        driver_lat:   driverLat,      driver_lng:   driverLng,
+        sender_lat:   sp?.latitude,
+        sender_lng:   sp?.longitude,
+        receiver_lat: rp?.latitude,
+        receiver_lng: rp?.longitude,
+        driver_lat:   driverLat,
+        driver_lng:   driverLng,
         driver_name:  driverName,
         driver_phone: driverPhone,
         driver_plate: driverPlate,
       };
-    }));
+    });
 
     setOrders(enriched);
     setLoading(false);
@@ -193,12 +239,10 @@ export function MyParcelTab() {
 
   async function confirmReceipt(orderId: string) {
     setConfirmingId(orderId);
-    // Fetch + update in parallel
     const [{ data: ord }] = await Promise.all([
       supabase.from('orders').select('driver_id, predicted_price').eq('id', orderId).single(),
       supabase.from('orders').update({ receiver_confirmed: true, sender_confirmed: true, status: 'delivered', updated_at: new Date().toISOString() }).eq('id', orderId),
     ]);
-    // Pay driver non-blocking
     if (ord?.driver_id && ord?.predicted_price) {
       const earning = Math.round(ord.predicted_price * 0.7);
       supabase.from('drivers').select('user_id').eq('id', ord.driver_id).single().then(({ data: drv }) => {
@@ -217,7 +261,6 @@ export function MyParcelTab() {
   async function confirmFoodReceipt(orderId: string) {
     setConfirmingId(orderId);
     try {
-      // Step 1: fetch order + update confirmed status in parallel
       const [{ data: ord }] = await Promise.all([
         supabase.from('food_orders').select('driver_user_id, delivery_fee').eq('id', orderId).single(),
         supabase.from('food_orders').update({
@@ -226,8 +269,6 @@ export function MyParcelTab() {
           updated_at:         new Date().toISOString(),
         }).eq('id', orderId),
       ]);
-
-      // Step 2: pay driver (non-blocking — don't wait)
       if (ord?.driver_user_id && ord?.delivery_fee) {
         const driverPay = Math.round(ord.delivery_fee * 0.7);
         supabase.rpc('increment_wallet_balance', { uid: ord.driver_user_id, delta: driverPay }).then(() => {
@@ -238,7 +279,6 @@ export function MyParcelTab() {
             status:      'completed',
             description: `Shop delivery earnings (70%) — order #${orderId.slice(0, 8)}`,
           }).then(() => {}).catch(() => {});
-          // Push notify driver they got paid
           supabase.functions.invoke('send-push', {
             body: {
               user_ids: [ord.driver_user_id],
@@ -250,21 +290,20 @@ export function MyParcelTab() {
           }).catch(() => {});
         }).catch(() => {});
       }
-
       loadOrders();
     } finally {
       setConfirmingId(null);
     }
   }
 
-  // Active = not cancelled, and not (delivered + receiver confirmed)
-  // Food orders stay active until receiver confirms; regular orders same
   const activeOrders = orders.filter(o => {
     if (o.status === 'cancelled') return false;
     if (o.status === 'delivered' && o.receiver_confirmed) return false;
     return true;
   });
-  const completedOrders = orders.filter(o => (o.status === 'delivered' && o.receiver_confirmed) || o.status === 'cancelled');
+  const completedOrders = orders.filter(o =>
+    (o.status === 'delivered' && o.receiver_confirmed) || o.status === 'cancelled'
+  );
 
   return (
     <div style={{ background: 'var(--bg)', minHeight: '100vh' }}>
@@ -572,7 +611,6 @@ function PaymentSection({ order, profile, payStatus, payingId, onPay }: any) {
   );
 }
 
-
 // ── Food Order Card ───────────────────────────────────────────
 function FoodOrderCard({ order, onConfirm, confirmingId }: { order: any; onConfirm?: () => void; confirmingId?: string | null }) {
   const statusColors: Record<string, string> = {
@@ -672,7 +710,7 @@ function FoodOrderCard({ order, onConfirm, confirmingId }: { order: any; onConfi
           </div>
         )}
 
-        {/* Confirm receipt button — only when driver has delivered but receiver not yet confirmed */}
+        {/* Confirm receipt button */}
         {order.status === 'delivered' && !order.receiver_confirmed && onConfirm && (
           <div style={{ marginTop: '12px', background: 'rgba(139,92,246,0.07)', border: '2px solid rgba(139,92,246,0.3)', borderRadius: '12px', padding: '14px' }}>
             <p style={{ fontWeight: 700, fontSize: '13px', color: '#8b5cf6', marginBottom: '4px' }}>📦 Your order has been delivered!</p>

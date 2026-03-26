@@ -7,13 +7,13 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   Package, DollarSign, AlertCircle, CloudRain,
-  CheckCircle, User, Search, X, MapPin, ChevronDown,
+  CheckCircle, User, Search, X, MapPin, ChevronDown, Star
 } from 'lucide-react';
+
+// FIXED: Use 3 dots to go up from tabs/order/
 import { supabase } from '../../../lib/supabase';
-import { Star } from 'lucide-react';
 import { useAuth } from '../../../contexts/AuthContext';
-import { isRushHour, haversineKm } from '../../../lib/pricePredictor';
-import { lookupPrice, isOfflineRushHour } from '../../../lib/kigaliPricing';
+import { predictPrice, isRushHour, haversineKm } from '../../../lib/pricePredictor';
 
 const RWANDA_DISTRICTS = [
   'Gasabo','Kicukiro','Nyarugenge',
@@ -154,10 +154,9 @@ function DistrictInput({ value, onChange, error }: { value: string; onChange: (v
   );
 }
 
-function LocationInput({ value, onChange, district, onValidated, onSectorDetected, error, setError }: {
+function LocationInput({ value, onChange, district, onValidated, error, setError }: {
   value: string; onChange: (v: string) => void; district: string;
   onValidated: (lat: number, lng: number, display: string) => void;
-  onSectorDetected?: (sector: string) => void;
   error?: string | null; setError: (e: string | null) => void;
 }) {
   const [suggestions, setSuggestions] = useState<any[]>([]);
@@ -179,14 +178,24 @@ function LocationInput({ value, onChange, district, onValidated, onSectorDetecte
       setLoading(true);
       try {
         const q = encodeURIComponent(`${value}, ${district || 'Kigali'}, Rwanda`);
-        const res = await fetch(`https://photon.komoot.io/api/?q=${q}&limit=6&bbox=28.8,-2.9,30.9,-1.0&lang=en`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=6&viewbox=28.8,-1.0,30.9,-2.9&bounded=1&countrycodes=rw`,
+          { headers: { 'Accept-Language': 'en', 'User-Agent': 'easy-go-app' }, signal: controller.signal }
+        );
+        clearTimeout(timeout);
         const data = await res.json();
-        const formatted = (data.features || []).map((f: any) => ({
-          lat: String(f.geometry.coordinates[1]),
-          lon: String(f.geometry.coordinates[0]),
-          display_name: [f.properties.name, f.properties.street, f.properties.city || 'Kigali', 'Rwanda'].filter(Boolean).join(', '),
-          address: { road: f.properties.street || f.properties.name, suburb: f.properties.district, city: f.properties.city || 'Kigali', city_district: f.properties.district },
-          sector: f.properties.suburb || f.properties.quarter || f.properties.city_district || f.properties.district || '',
+        const formatted = (data || []).map((item: any) => ({
+          lat: item.lat,
+          lon: item.lon,
+          display_name: item.display_name,
+          address: {
+            road: item.display_name?.split(',')[0]?.trim(),
+            suburb: item.display_name?.split(',')[1]?.trim(),
+            city: item.display_name?.split(',')[2]?.trim() || 'Kigali',
+            city_district: item.display_name?.split(',')[1]?.trim(),
+          }
         }));
         setSuggestions(formatted); setShow(formatted.length > 0);
       } catch { setSuggestions([]); }
@@ -216,7 +225,7 @@ function LocationInput({ value, onChange, district, onValidated, onSectorDetecte
             {suggestions.map((place, i) => {
               const label = formatSuggestion(place);
               return (
-                <div key={i} onMouseDown={() => { onValidated(parseFloat(place.lat), parseFloat(place.lon), label); if (place.sector && onSectorDetected) onSectorDetected(place.sector); setPinned(true); setError(null); setShow(false); }}
+                <div key={i} onMouseDown={() => { onValidated(parseFloat(place.lat), parseFloat(place.lon), label); setPinned(true); setError(null); setShow(false); }}
                   style={{ padding: '9px 14px', cursor: 'pointer', borderBottom: '1px solid var(--border)', background: 'transparent' }}
                   onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--bg3)'}
                   onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}>
@@ -230,9 +239,6 @@ function LocationInput({ value, onChange, district, onValidated, onSectorDetecte
       </div>
       {error  && <p style={{ fontSize: '11px', color: 'var(--red)',   marginTop: '5px' }}>⚠️ {error}</p>}
       {pinned && <p style={{ fontSize: '11px', color: 'var(--green)', marginTop: '5px' }}>✓ Location pinned on map</p>}
-      {!pinned && value.length > 3 && !error && (
-        <p style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px' }}>💡 Pick from the list to auto-detect your neighbourhood</p>
-      )}
     </div>
   );
 }
@@ -251,8 +257,6 @@ export function SenderOrderView({ onPriceRequest }: {
   const [manualName,       setManualName]       = useState('');
   const [manualDistrict,   setManualDistrict]   = useState('');
   const [manualLocation,   setManualLocation]   = useState('');
-  const [manualSector,     setManualSector]     = useState('');  // auto-detected from Photon
-  const [receiverSector,   setReceiverSector]   = useState('');
   const [manualLocCoords,  setManualLocCoords]  = useState<{ lat: number; lng: number } | null>(null);
   const [phoneErr,         setPhoneErr]         = useState<string | null>(null);
   const [districtErr,      setDistrictErr]      = useState<string | null>(null);
@@ -285,6 +289,9 @@ export function SenderOrderView({ onPriceRequest }: {
   const [routeKm,        setRouteKm]        = useState<{ d2s: number; s2r: number } | null>(null);
   const [loading,     setLoading]     = useState(false);
   const [success,     setSuccess]     = useState(false);
+  const [dispatching, setDispatching] = useState(false);
+  const [noDriver, setNoDriver] = useState(false);
+  const [dispatchMsg, setDispatchMsg] = useState(''); // Added this too as it is used on line 326
   const [isFragile,      setIsFragile]      = useState(false);
   const [deliverySpeed,  setDeliverySpeed]  = useState<'normal'|'rapid'>('normal');
   const [senderPos, setSenderPos] = useState<[number,number]>([-1.9441, 30.0619]);
@@ -369,53 +376,13 @@ export function SenderOrderView({ onPriceRequest }: {
 
   const allFilled = receiverReady && !!packageWeight;
 
-  // ── Build rich location strings: street + Photon sector + district ───────────
-  // sector is auto-detected from Photon when user picks a suggestion — no manual input
-  const receiverLocText = receiverHasApp
-    ? [selectedReceiver?.location, (selectedReceiver as any)?.sector, selectedReceiver?.district].filter(Boolean).join(' ')
-    : [manualLocation, manualSector, manualDistrict].filter(Boolean).join(' ');
-  const senderLocText = [
-    (profile as any)?.location,
-    (profile as any)?.sector,   // saved at signup via Photon detection
-    (profile as any)?.district,
-  ].filter(Boolean).join(' ');
-
-  // ── Price from zone table — instant, no network, no map needed ───────────────
   useEffect(() => {
-    if (!receiverLocText.trim() || !senderLocText.trim()) {
-      setPredictedPrice(0); setPriceReady(false); setBreakdown(null);
-      return;
-    }
-    const result = lookupPrice({
-      senderLocation:   senderLocText,
-      receiverLocation: receiverLocText,
-      packageSize:      packageSize as any,
-      isRushHour:       isOfflineRushHour(),
-      isRaining:        weatherCond === 'rain',
-      poorRoads:        roadCond === 'poor',
-      isRapid:          deliverySpeed === 'rapid',
-    });
-    if (result) {
-      setPredictedPrice(result.priceRwf);
-      setBreakdown({
-        fromZone:    result.fromZone,
-        toZone:      result.toZone,
-        distKm:      result.distKm,
-        multipliers: result.multipliers,
-        confidence:  result.confidence,
-        source:      result.source,
-      });
-      setPriceReady(true);
-    }
-  }, [receiverLocText, senderLocText, packageSize, weatherCond, roadCond, deliverySpeed, selectedReceiver?.id]);
+    if (allFilled) calculatePrice();
+    else { setPredictedPrice(0); setPriceReady(false); setBreakdown(null); setRouteKm(null); }
+  }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat, packageSize, weatherCond, roadCond, isFragile, deliverySpeed]);
 
-  // ── allFilled → fetch route for km/time display only (never used for price) ──
-  useEffect(() => {
-    if (allFilled) fetchRouteDisplay();
-    else setRouteKm(null);
-  }, [allFilled, selectedReceiver?.id, manualLocCoords?.lat]);
-
-  async function fetchRouteDisplay() {
+  async function calculatePrice() {
+    setPriceLoading(true); setPriceReady(false);
     try {
       const { data: drivers } = await supabase.from('drivers').select('latitude,longitude').eq('is_on_duty', true).eq('is_available', true).not('latitude', 'is', null);
       let distD2S = 2.0;
@@ -427,18 +394,34 @@ export function SenderOrderView({ onPriceRequest }: {
         }, null);
         if (closest) distD2S = await getRoadKm([closest.latitude, closest.longitude], senderPos);
       }
-      let distS2R = breakdown?.distKm ?? 5.0;
+      let distS2R = 5.0;
       if (receiverHasApp && selectedReceiver?.id) {
         const { data: rp } = await supabase.from('profiles').select('latitude,longitude').eq('id', selectedReceiver.id).maybeSingle();
         if (rp?.latitude && rp?.longitude) distS2R = await getRoadKm(senderPos, [rp.latitude, rp.longitude]);
       } else if (!receiverHasApp && manualLocCoords) {
         distS2R = await getRoadKm(senderPos, [manualLocCoords.lat, manualLocCoords.lng]);
       }
-      setRouteKm({
-        d2s: Math.min(Math.max(distD2S, 0.5), 50),
-        s2r: Math.min(Math.max(distS2R, 0.5), 50),
-      });
-    } catch { /* route display optional — price unaffected */ }
+      const rush = isRushHour(); const badWx = weatherCond === 'rain'; const badRoads = roadCond === 'poor';
+      const safeD2S = Math.min(Math.max(distD2S, 0.5), 50);
+      const safeS2R = Math.min(Math.max(distS2R, 0.5), 50);
+      setRouteKm({ d2s: safeD2S, s2r: safeS2R });
+      let base = 0;
+      if (onPriceRequest) {
+        base = (await onPriceRequest({ dist_to_sender: safeD2S, dist_to_receiver: safeS2R, is_rush_hour: rush ? 1 : 0, bad_weather: badWx ? 1 : 0, bad_roads: badRoads ? 1 : 0 })) ?? 0;
+      } else {
+        const r = predictPrice({ distDriverToSender: safeD2S, distSenderToReceiver: safeS2R, isRushHour: rush, badWeather: badWx, badRoads });
+        base = r.totalFrw;
+        setBreakdown({ distD2S: safeD2S, distS2R: safeS2R, isHarsh: r.breakdown.isHarsh, rate1: r.breakdown.rate1PerKm, rate2: r.breakdown.rate2PerKm });
+      }
+      let final = base;
+      if (packageSize === 'large') final = Math.round(final * 1.3);
+      if (packageSize === 'small') final = Math.round(final * 0.8);
+      if (roadCond === 'moderate') final = Math.round(final * 1.1);
+      if (deliverySpeed === 'rapid') final = Math.round(final * 1.2);
+      setPredictedPrice(Math.max(final, 1500)); setPriceReady(true);
+    } catch (err) {
+      console.error(err); setPredictedPrice(3500); setPriceReady(true);
+    } finally { setPriceLoading(false); }
   }
 
   async function submitReview() {
@@ -545,20 +528,26 @@ export function SenderOrderView({ onPriceRequest }: {
         });
       }
 
-      // Push notify all on-duty drivers
-      const { data: onDutyDrivers } = await supabase
-        .from('drivers').select('user_id').eq('is_on_duty', true);
-      if (onDutyDrivers?.length) {
-        supabase.functions.invoke('send-push', {
-          body: {
-            user_ids: onDutyDrivers.map((d: any) => d.user_id),
-            title:    '🏍️ New Delivery Order!',
-            body:     `${receiverLocation} · ${predictedPrice.toLocaleString()} RWF`,
-            url:      '/',
-            tag:      'new-order',
-          },
-        }).catch(() => {});
-      }
+      // Start dispatch — ring motaris one by one
+      setDispatching(true);
+      setDispatchMsg('🔍 Finding a driver for you...');
+      supabase.functions.invoke('dispatch-order', {
+        body: {
+          order_id:        newOrder.id,
+          sender_location: (profile as any).location,
+          receiver_location: receiverLocation,
+          predicted_price: predictedPrice,
+        },
+      }).then((res: any) => {
+        setDispatching(false);
+        if (res?.data?.dispatched === false) {
+          setNoDriver(true);
+          setDispatchMsg('');
+          setTimeout(() => setNoDriver(false), 8000);
+        } else {
+          setDispatchMsg('');
+        }
+      }).catch(() => { setDispatching(false); setDispatchMsg(''); });
       // Push notify receiver that someone is sending them a package
       if (receiverId) {
         supabase.functions.invoke('send-push', {
@@ -586,6 +575,35 @@ export function SenderOrderView({ onPriceRequest }: {
       setSuccess(true);
       setTimeout(() => setSuccess(false), 6000);
 
+      // Watch this order for real-time status updates
+      const orderId = newOrder.id;
+      const orderCh = supabase.channel('order-status-' + orderId)
+        .on('postgres_changes', {
+          event: 'UPDATE', schema: 'public', table: 'orders',
+          filter: `id=eq.${orderId}`,
+        }, (payload: any) => {
+          const updated = payload.new as any;
+          if (updated.status === 'accepted') {
+            setDispatchMsg('');
+            setDispatching(false);
+            // Show in-app alert
+            const evt = new CustomEvent('easygo-push', {
+              detail: { title: '🏍️ Driver Found!', body: 'A driver accepted your order and is on the way' }
+            });
+            window.dispatchEvent(evt);
+          }
+          if (updated.status === 'no_driver') {
+            setDispatching(false);
+            setNoDriver(true);
+            setTimeout(() => setNoDriver(false), 8000);
+            supabase.removeChannel(orderCh);
+          }
+          if (['in_transit', 'delivered'].includes(updated.status)) {
+            supabase.removeChannel(orderCh);
+          }
+        })
+        .subscribe();
+
     } catch (err: any) {
       console.error(err);
       alert('Error: ' + err.message);
@@ -596,6 +614,30 @@ export function SenderOrderView({ onPriceRequest }: {
 
   return (
     <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+      {/* Finding driver animation */}
+      {dispatching && (
+        <div style={{ background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.3)', borderRadius: '14px', padding: '20px', textAlign: 'center' }}>
+          <div style={{ fontSize: '40px', marginBottom: '12px' }}>🏍️</div>
+          <p style={{ fontWeight: 800, fontSize: '16px', color: 'var(--yellow)', marginBottom: '8px' }}>Finding your driver...</p>
+          <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: '16px' }}>Ringing available motaris one by one</p>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '6px' }}>
+            {[0,1,2].map(i => (
+              <div key={i} style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--yellow)', animation: `pulse 1.4s ease ${i * 0.2}s infinite` }} />
+            ))}
+          </div>
+          <style>{`@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.3;transform:scale(.6)} }`}</style>
+        </div>
+      )}
+
+      {/* No driver found */}
+      {noDriver && (
+        <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '14px', padding: '20px', textAlign: 'center' }}>
+          <div style={{ fontSize: '40px', marginBottom: '12px' }}>😔</div>
+          <p style={{ fontWeight: 800, fontSize: '16px', color: '#ef4444', marginBottom: '8px' }}>No Driver Available</p>
+          <p style={{ fontSize: '13px', color: 'var(--text3)' }}>All motaris are busy or offline. Please try again in a few minutes.</p>
+        </div>
+      )}
 
       {success && (
         <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '10px', padding: '14px', display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -673,7 +715,7 @@ export function SenderOrderView({ onPriceRequest }: {
             </div>
             <PhoneInput label="Phone Number" value={manualPhone} onChange={v => { setManualPhone(v); setPhoneErr(validatePhone(v.code, v.number)); }} error={phoneErr} />
             <DistrictInput value={manualDistrict} onChange={v => { setManualDistrict(v); setDistrictErr(validateDistrict(v)); }} error={districtErr} />
-            <LocationInput value={manualLocation} onChange={v => { setManualLocation(v); setManualSector(''); }} district={manualDistrict} onSectorDetected={setManualSector}
+            <LocationInput value={manualLocation} onChange={setManualLocation} district={manualDistrict}
               onValidated={(lat, lng, display) => { setManualLocCoords({ lat, lng }); setManualLocation(display); }}
               error={locationErr} setError={setLocationErr} />
             {manualLocCoords && (
@@ -686,7 +728,38 @@ export function SenderOrderView({ onPriceRequest }: {
         {receiverHasApp === null && <p style={{ fontSize: '12px', color: 'var(--text3)', textAlign: 'center', padding: '8px 0' }}>☝️ Choose whether receiver has Easy GO app</p>}
       </div>
 
-      {/* ── PACKAGE ── */}
+      {/* ── WEIGHT INPUT (always visible) ── */}
+      <div className="card">
+        <Sec icon={Package} title="Package Weight" color="var(--blue)" />
+        <div>
+          <label className="eg-label">Weight (kg)</label>
+          <input
+            className="eg-input"
+            required
+            placeholder="e.g. 2.5"
+            inputMode="decimal"
+            value={packageWeight}
+            onChange={e => {
+              const val = e.target.value.replace(/[^0-9.]/g, '');
+              setPackageWeight(val);
+              const kg = parseFloat(val);
+              if (!isNaN(kg)) {
+                if (kg < 2) setPackageSize('small');
+                else if (kg <= 10) setPackageSize('medium');
+                else setPackageSize('large');
+              }
+            }}
+          />
+          {packageWeight && (
+            <p style={{ fontSize: '11px', color: 'var(--green)', marginTop: '6px', fontWeight: 600 }}>
+              ✓ {packageWeight} kg entered — package details unlocked below
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* ── PACKAGE DETAILS (shown only after weight is entered) ── */}
+      {packageWeight && (
       <div className="card">
         <Sec icon={Package} title="Package Details" color="var(--blue)" />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '12px' }}>
@@ -699,10 +772,6 @@ export function SenderOrderView({ onPriceRequest }: {
               <p style={{ fontSize: '10px', color: 'var(--text3)', marginTop: '2px' }}>{s.mult}</p>
             </div>
           ))}
-        </div>
-        <div>
-          <label className="eg-label">Weight</label>
-          <input className="eg-input" required placeholder="e.g. 2.5 kg" value={packageWeight} onChange={e => setPackageWeight(e.target.value)} />
         </div>
         <div style={{ marginTop: '4px' }}>
           <label className="eg-label">Product Handling</label>
@@ -733,6 +802,7 @@ export function SenderOrderView({ onPriceRequest }: {
           </div>
         </div>
       </div>
+      )} {/* end packageWeight conditional */}
 
       {/* ── PAYMENT ── */}
       <div className="card">
@@ -836,57 +906,41 @@ export function SenderOrderView({ onPriceRequest }: {
       ) : (
         <div style={{ background: 'var(--yellow-dim)', border: '1px solid rgba(245,197,24,0.25)', borderRadius: '14px', padding: '20px', textAlign: 'center' }}>
           <p style={{ fontSize: '11px', color: 'var(--text3)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 600 }}>AI Predicted Price</p>
-          <>
-            {/* Big price */}
-            <p style={{ fontWeight: 900, fontSize: '38px', color: 'var(--yellow)', letterSpacing: '-.02em', marginBottom: '4px' }}>
-              {predictedPrice.toLocaleString()} <span style={{ fontSize: '16px', fontWeight: 600, opacity: 0.6 }}>RWF</span>
-            </p>
-
-            {/* Zone route */}
-            {breakdown?.fromZone && (
-              <p style={{ fontSize: '13px', color: 'var(--text3)', marginBottom: '8px' }}>
-                📍 {breakdown.fromZone} → {breakdown.toZone}
-                {breakdown.distKm ? <span style={{ marginLeft: '6px' }}>· ~{breakdown.distKm}km</span> : null}
-              </p>
-            )}
-
-            {/* Confidence badge */}
-            {breakdown?.confidence && (
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '3px 10px', borderRadius: '20px', marginBottom: '10px',
-                background: breakdown.confidence === 'exact' ? 'rgba(34,197,94,0.08)' : breakdown.confidence === 'near' ? 'rgba(245,197,24,0.08)' : 'rgba(249,115,22,0.08)',
-                border: `1px solid ${breakdown.confidence === 'exact' ? 'rgba(34,197,94,0.25)' : breakdown.confidence === 'near' ? 'rgba(245,197,24,0.25)' : 'rgba(249,115,22,0.25)'}`,
-              }}>
-                <span style={{ fontSize: '11px', fontWeight: 700,
-                  color: breakdown.confidence === 'exact' ? 'var(--green)' : breakdown.confidence === 'near' ? 'var(--yellow)' : '#f97316',
-                }}>
-                  {breakdown.confidence === 'exact' ? '✅ Zone matched' : breakdown.confidence === 'near' ? '🟡 Approx match' : '🟠 Estimated — add neighbourhood for better price'}
-                </span>
-              </div>
-            )}
-
-            {/* Active multipliers */}
-            {breakdown?.multipliers?.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', justifyContent: 'center', marginBottom: '8px' }}>
-                {breakdown.multipliers.map((m: string, i: number) => (
-                  <span key={i} style={{ fontSize: '11px', fontWeight: 600, padding: '3px 8px', borderRadius: '8px', background: 'rgba(245,197,24,0.08)', border: '1px solid rgba(245,197,24,0.2)', color: 'var(--yellow)' }}>
-                    {m}
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <p style={{ fontSize: '10px', color: 'var(--text3)', opacity: 0.6 }}>
-              🗺️ Fixed zone price · map shows km only
-            </p>
-          </>
+          {priceLoading ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '10px 0' }}>
+              <div className="spinner" /><p style={{ fontSize: '13px', color: 'var(--text3)' }}>Calculating road distance…</p>
+            </div>
+          ) : (
+            <>
+              <p style={{ fontWeight: 700, fontSize: '36px', color: 'var(--yellow)', letterSpacing: '-.02em', marginBottom: '4px' }}>{predictedPrice.toLocaleString()} <span style={{ fontSize: '16px' }}>RWF</span></p>
+              <p style={{ fontSize: '12px', color: 'var(--text3)', marginBottom: breakdown ? '12px' : 0 }}>🤖 ML model · real road km · conditions applied</p>
+              {breakdown && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px' }}>
+                  <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: '8px', padding: '8px' }}>
+                    <p style={{ fontSize: '9px', color: '#92400e', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Driver→Sender</p>
+                    <p style={{ fontSize: '14px', fontWeight: 800, color: '#f59e0b' }}>{breakdown.distD2S.toFixed(1)} km</p>
+                    <p style={{ fontSize: '10px', color: '#78350f' }}>{breakdown.rate1} RWF/km</p>
+                  </div>
+                  <div style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '8px', padding: '8px' }}>
+                    <p style={{ fontSize: '9px', color: '#166534', fontWeight: 700, textTransform: 'uppercase', marginBottom: '3px' }}>Sender→Receiver</p>
+                    <p style={{ fontSize: '14px', fontWeight: 800, color: '#22c55e' }}>{breakdown.distS2R.toFixed(1)} km</p>
+                    <p style={{ fontSize: '10px', color: '#14532d' }}>{breakdown.rate2} RWF/km</p>
+                  </div>
+                  <div style={{ gridColumn: 'span 2', background: breakdown.isHarsh ? 'rgba(239,68,68,0.08)' : 'rgba(34,197,94,0.08)', border: `1px solid ${breakdown.isHarsh ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)'}`, borderRadius: '8px', padding: '8px' }}>
+                    <p style={{ fontSize: '12px', fontWeight: 700, color: breakdown.isHarsh ? 'var(--red)' : 'var(--green)' }}>{breakdown.isHarsh ? '⚡ Surge pricing active' : '✅ Normal pricing'}</p>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 
       <button type="submit" className="btn-yellow"
-        disabled={loading || !priceReady || walletBalance < predictedPrice}
+        disabled={loading || priceLoading || !priceReady || walletBalance < predictedPrice}
         style={{ fontSize: '15px', padding: '13px' }}>
         {loading          ? '⏳ Placing order…' :
-         !priceReady      ? 'Enter locations to see price' :
+         !priceReady      ? 'Fill all fields first' :
          walletBalance < predictedPrice ? `⚠️ Top up wallet — need ${predictedPrice.toLocaleString()} RWF` :
          `🚀 Place Order — ${predictedPrice.toLocaleString()} RWF from Wallet`}
       </button>

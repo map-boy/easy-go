@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle, Clock, Package, Phone, ShoppingBag } from 'lucide-react';
+
+// Change these lines at the top of DriverOrderView.tsx
 import { supabase } from '../../../lib/supabase';
 import { useAuth } from '../../../contexts/AuthContext';
 

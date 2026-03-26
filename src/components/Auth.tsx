@@ -133,6 +133,9 @@ export function Auth({ onBack, onDemo }: AuthProps) {
   const [showPw,      setShowPw]        = useState(false);
   const [showLoginPw, setShowLoginPw]   = useState(false);
 
+  // ✅ NEW: controls the "Need help?" accordion
+  const [showSupport, setShowSupport]   = useState(false);
+
   // Login fields
   const [loginPhone,    setLoginPhone]    = useState({ code: '+250', number: '' });
   const [loginPassword, setLoginPassword] = useState('');
@@ -188,12 +191,21 @@ export function Auth({ onBack, onDemo }: AuthProps) {
       setLocationLoading(true);
       try {
         const q   = encodeURIComponent(`${val}, ${formData.district || 'Kigali'}, Rwanda`);
-        const res = await fetch(`https://photon.komoot.io/api/?q=${q}&limit=5&bbox=28.8,-2.9,30.9,-1.0&lang=en`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=5&viewbox=28.8,-1.0,30.9,-2.9&bounded=1&countrycodes=rw`,
+          { headers: { 'Accept-Language': 'en', 'User-Agent': 'easy-go-app' }, signal: controller.signal }
+        );
+        clearTimeout(timeout);
         const d   = await res.json();
-        const formatted = (d.features || []).map((f: any) => ({
-          display: [f.properties.name, f.properties.street, f.properties.city || 'Kigali'].filter(Boolean).join(', '),
-          sector:  f.properties.suburb || f.properties.quarter || f.properties.city_district || f.properties.district || '',
-        }));
+        const formatted = (d || []).map((item: any) => {
+          const parts = item.display_name?.split(',') || [];
+          return {
+            display: parts.slice(0, 3).join(',').trim(),
+            sector:  parts[1]?.trim() || '',
+          };
+        });
         setLocationSuggestions(formatted);
         setShowLocationDrop(formatted.length > 0);
       } catch { setLocationSuggestions([]); }
@@ -433,7 +445,6 @@ export function Auth({ onBack, onDemo }: AuthProps) {
                     {locationLoading && <div className="spinner" style={{ position: 'absolute', right: '11px', top: '50%', transform: 'translateY(-50%)', width: '13px', height: '13px' }} />}
                   </div>
                   {locationErr && <p style={{ fontSize: '11px', color: '#ef4444', marginTop: '4px' }}>⚠️ {locationErr}</p>}
-                  {/* Auto-detected sector badge */}
                   {detectedSector && !locationErr && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', padding: '5px 10px', background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: '8px' }}>
                       <span style={{ fontSize: '12px' }}>✅</span>
@@ -567,6 +578,96 @@ export function Auth({ onBack, onDemo }: AuthProps) {
               {isLogin ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
             </button>
           </div>
+
+          {/* ── SUPPORT FOOTER — collapsible accordion ── */}
+          <div style={{
+            marginTop: '28px',
+            border: '1px solid #1e2a3a',
+            borderRadius: '14px',
+            overflow: 'hidden',
+          }}>
+            {/* ✅ Clickable header — toggles open/close */}
+            <button
+              type="button"
+              onClick={() => setShowSupport(v => !v)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '13px 16px',
+                background: showSupport ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.02)',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'Space Grotesk, sans-serif',
+                transition: 'background .15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+              onMouseLeave={e => (e.currentTarget.style.background = showSupport ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.02)')}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '15px' }}>🆘</span>
+                <span style={{ fontSize: '12px', fontWeight: 700, color: '#5a6a80', textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                  Need help?
+                </span>
+              </div>
+              {showSupport
+                ? <ChevronUp size={15} color="#5a6a80" />
+                : <ChevronDown size={15} color="#5a6a80" />
+              }
+            </button>
+
+            {/* ✅ Collapsible content */}
+            {showSupport && (
+              <div style={{
+                padding: '4px 16px 16px',
+                background: 'rgba(255,255,255,0.02)',
+                borderTop: '1px solid #1e2a3a',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '8px',
+              }}>
+                {/* WhatsApp */}
+                <a
+                  href="https://wa.me/+250780867473"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                    padding: '10px 14px', borderRadius: '10px', marginTop: '8px',
+                    background: 'rgba(37,211,102,0.08)', border: '1px solid rgba(37,211,102,0.25)',
+                    textDecoration: 'none',
+                  }}
+                >
+                  <span style={{ fontSize: '16px' }}>💬</span>
+                  <div style={{ textAlign: 'left' }}>
+                    <p style={{ fontSize: '12px', fontWeight: 700, color: '#25d366', margin: 0 }}>WhatsApp Support</p>
+                    <p style={{ fontSize: '11px', color: '#334155', margin: 0 }}>+250 780 867 473</p>
+                  </div>
+                </a>
+                {/* Call */}
+                <a
+                  href="tel:+250780867473"
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
+                    padding: '10px 14px', borderRadius: '10px',
+                    background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.2)',
+                    textDecoration: 'none',
+                  }}
+                >
+                  <span style={{ fontSize: '16px' }}>📞</span>
+                  <div style={{ textAlign: 'left' }}>
+                    <p style={{ fontSize: '12px', fontWeight: 700, color: '#60a5fa', margin: 0 }}>Call Us</p>
+                    <p style={{ fontSize: '11px', color: '#334155', margin: 0 }}>+250 780 867 473 · Mon–Sat 7am–9pm</p>
+                  </div>
+                </a>
+                <p style={{ fontSize: '10px', color: '#1e2a3a', marginTop: '4px', textAlign: 'center' }}>
+                  Easy GO · Kigali, Rwanda
+                </p>
+              </div>
+            )}
+          </div>
+
         </div>
       </div>
     </div>

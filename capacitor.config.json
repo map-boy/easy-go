@@ -13,16 +13,32 @@
       "*.cartocdn.com",
       "*.project-osrm.org",
       "photon.komoot.io",
-      "*.mtn.com"
+      "*.mtn.com",
+      "*.tile.openstreetmap.fr",
+      "*.basemaps.cartocdn.com",
+      "*.tile.opentopomap.org",
+      "server.arcgisonline.com",
+      "nominatim.openstreetmap.org",
+      "unpkg.com"
     ]
   },
   "plugins": {
     "SplashScreen": {
-      "launchShowDuration": 2000,
+      "launchShowDuration": 0,
+      "launchAutoHide": false,
       "backgroundColor": "#0a0a0a",
+      "androidSplashResourceName": "splash",
       "showSpinner": false,
       "splashFullScreen": true,
       "splashImmersive": true
+    },
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_notify",
+      "iconColor": "#f5c518",
+      "sound": "default"
     }
   },
   "android": {

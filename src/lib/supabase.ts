@@ -1,13 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Missing Supabase environment variables');
-}
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// --- CHANGE THESE TWO LINES BELOW ---
+const supabaseUrl = 'https://oqlrpjoentqxlfotmyat.supabase.co'; // <--- Put your real URL here
+const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9xbHJwam9lbnRxeGxmb3RteWF0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2NDY5NjYsImV4cCI6MjA4NzIyMjk2Nn0.VyhYzQXtw4XjkyCDGbLOXJLVOz-L3hVAfTprdgSKetQ';     // <--- Put your real Key here
+// -------------------------------------
+export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey);
 
 export type Database = {
   public: {
@@ -21,6 +18,7 @@ export type Database = {
           location: string;
           profile_picture: string;
           user_category: 'sender' | 'receiver' | 'motari';
+          role: 'sender' | 'receiver' | 'driver'; // Added role
           is_active: boolean;
           last_activity: string;
           created_at: string;
@@ -75,6 +73,30 @@ export type Database = {
           payer_number: string;
           created_at: string;
           updated_at: string;
+        };
+      };
+      // Added missing table for your Notification Bell
+      notifications: {
+        Row: {
+          id: string;
+          user_id: string;
+          title: string;
+          body: string;
+          read: boolean;
+          created_at: string;
+        };
+      };
+      // Added missing table for Motari Food/Shop orders
+      food_orders: {
+        Row: {
+          id: string;
+          customer_id: string;
+          driver_id: string | null;
+          items: any; // JSONB
+          total_price: number;
+          status: string;
+          delivery_address: string;
+          created_at: string;
         };
       };
     };

@@ -11,6 +11,20 @@
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
   },
   "dependencies": {
+    "@capacitor/android": "^8.2.0",
+    "@capacitor/app": "^8.0.1",
+    "@capacitor/background-runner": "^3.0.0",
+    "@capacitor/browser": "^8.0.2",
+    "@capacitor/cli": "^8.2.0",
+    "@capacitor/clipboard": "^8.0.1",
+    "@capacitor/core": "^8.2.0",
+    "@capacitor/device": "^8.0.1",
+    "@capacitor/geolocation": "^8.1.0",
+    "@capacitor/haptics": "^8.0.1",
+    "@capacitor/local-notifications": "^8.0.2",
+    "@capacitor/network": "^8.0.1",
+    "@capacitor/push-notifications": "^8.0.2",
+    "@capawesome-team/capacitor-android-battery-optimization": "^8.0.1",
     "@supabase/supabase-js": "^2.57.4",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.344.0",
@@ -19,6 +33,8 @@
     "react-leaflet": "^4.2.1"
   },
   "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/splash-screen": "^8.0.1",
     "@eslint/js": "^9.9.1",
     "@types/leaflet": "^1.9.21",
     "@types/react": "^18.3.5",

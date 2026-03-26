@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { registerPush } from '../lib/pushNotifications';
 import { supabase } from '../lib/supabase';
+
+// Stub — replace with your real push setup when Firebase is configured
+async function registerPush(_userId: string) { /* no-op for web */ }
 
 interface Profile {
   id: string;
@@ -19,6 +21,8 @@ interface AuthContextType {
   user: any;
   profile: Profile | null;
   loading: boolean;
+  permissionsShown: boolean;
+  setPermissionsShown: (v: boolean) => void;
   signIn: (email: string, password: string) => Promise<void>;
   signInWithPhone: (phone: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, metadata: any) => Promise<any>;
@@ -28,6 +32,8 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType>({
   user: null, profile: null, loading: true,
+  permissionsShown: false,
+  setPermissionsShown: () => {},
   signIn: async () => {},
   signInWithPhone: async () => {},
   signUp: async () => {},
@@ -39,6 +45,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser]       = useState<any>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [permissionsShown, setPermissionsShown] = useState(() => {
+    return localStorage.getItem('eg-permissions-shown') === 'true';
+  });
+
+  function handleSetPermissionsShown(v: boolean) {
+    setPermissionsShown(v);
+    localStorage.setItem('eg-permissions-shown', String(v));
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -64,8 +78,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .single();
     setProfile(data);
     setLoading(false);
-    // Register push notifications
-    if (data?.id) registerPush(data.id, supabase).catch(() => {});
+    // Register push notifications (Firebase for native, Web Push for browser)
+    if (data?.id) registerPush(data.id).catch(() => {});
   }
 
   async function signIn(email: string, password: string) {
@@ -146,7 +160,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signIn, signInWithPhone, signUp, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ user, profile, loading, permissionsShown, setPermissionsShown: handleSetPermissionsShown, signIn, signInWithPhone, signUp, signOut, refreshProfile }}>
       {children}
     </AuthContext.Provider>
   );
